@@ -1,6 +1,6 @@
 {
-  "name": "modern-pluto-client",
-  "displayName": "ModernPlutoClient",
+  "name": "better-pluto-client",
+  "displayName": "BetterPlutoClient",
   "description": "View and edit Pluto.jl notebooks in VS Code with native notebook support",
   "version": "0.0.1",
   "engines": {
