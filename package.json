@@ -16,6 +16,17 @@
   ],
   "main": "./dist/extension.js",
   "contributes": {
+    "notebookRenderer": [
+      {
+        "id": "pluto-html-renderer",
+        "displayName": "Pluto HTML Renderer",
+        "entrypoint": "./dist/pluto-renderer.js",
+        "mimeTypes": [
+          "text/html"
+        ],
+        "requiresMessaging": "always"
+      }
+    ],
     "notebooks": [
       {
         "type": "pluto-notebook",
@@ -51,6 +62,12 @@
         "title": "Restart Pluto Kernel",
         "category": "Pluto",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "pluto-notebook.wrapInBeginEnd",
+        "title": "Wrap Cell in begin...end",
+        "category": "Pluto",
+        "icon": "$(code)"
       }
     ],
     "menus": {
@@ -84,8 +101,23 @@
           "when": "notebookType == pluto-notebook && pluto.kernelRunning",
           "group": "navigation/execute@2"
         }
+      ],
+      "notebook/cell/title": [
+        {
+          "command": "pluto-notebook.wrapInBeginEnd",
+          "when": "notebookType == pluto-notebook && notebookCellType == code",
+          "group": "inline@1"
+        }
       ]
-    }
+    },
+    "keybindings": [
+      {
+        "command": "pluto-notebook.wrapInBeginEnd",
+        "key": "ctrl+shift+b",
+        "mac": "cmd+shift+b",
+        "when": "notebookType == pluto-notebook && notebookCellFocused"
+      }
+    ]
   },
   "scripts": {
     "vscode:prepublish": "yarn run package",

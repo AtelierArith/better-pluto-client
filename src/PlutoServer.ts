@@ -46,6 +46,10 @@ export class PlutoServer extends EventEmitter {
     // Track accumulated output state for each cell
     private cellOutputs: Map<string, { body?: string; mime?: string }> = new Map();
 
+    // Track known cell IDs and their order
+    private knownCellIds = new Set<string>();
+    private cellOrder: string[] = [];
+
     constructor() {
         super();
         this.clientId = this.generateId();
@@ -281,6 +285,12 @@ export class PlutoServer extends EventEmitter {
                 if (fullState?.cell_results) {
                     this.handleFullCellResults(fullState.cell_results as Record<string, unknown>);
                 }
+                // Track cell order from initial state
+                if (fullState?.cell_order && Array.isArray(fullState.cell_order)) {
+                    this.cellOrder = fullState.cell_order as string[];
+                    this.knownCellIds = new Set(this.cellOrder);
+                    console.log(`[PlutoServer] Initial cell order: ${this.cellOrder.length} cells`);
+                }
                 continue;
             }
 
@@ -444,8 +454,12 @@ export class PlutoServer extends EventEmitter {
         let output = this.cellOutputs.get(cellId) || { body: '', mime: 'text/plain' };
 
         if (subField === 'body') {
-            // Body can be string or object (for complex types)
-            if (typeof value === 'string') {
+            // Body can be string or object (for complex types like msgpack binary)
+            // First try to decode msgpack binary format
+            const decodedBody = this.tryDecodeMsgpackBinary(value, output.mime || 'text/plain');
+            if (decodedBody !== null) {
+                output.body = decodedBody;
+            } else if (typeof value === 'string') {
                 output.body = value;
             } else if (value && typeof value === 'object') {
                 // For complex output like errors, try to extract msg or stringify
@@ -484,17 +498,134 @@ export class PlutoServer extends EventEmitter {
         }
 
         let body = '';
+        const mime = (output.mime as string) || 'text/plain';
+
         if (output.body !== undefined) {
-            if (typeof output.body === 'string') {
+            // First, try to decode if it's already a msgpack binary format object
+            const decodedBody = this.tryDecodeMsgpackBinary(output.body, mime);
+            if (decodedBody !== null) {
+                body = decodedBody;
+            } else if (typeof output.body === 'string') {
                 body = output.body;
+            } else if (output.body instanceof Uint8Array || ArrayBuffer.isView(output.body)) {
+                // Handle binary data (like PNG images)
+                const bytes = output.body instanceof Uint8Array
+                    ? output.body
+                    : new Uint8Array((output.body as ArrayBufferView).buffer);
+                // Convert to base64 for binary images
+                if (mime.startsWith('image/') && mime !== 'image/svg+xml') {
+                    body = Buffer.from(bytes).toString('base64');
+                } else {
+                    // For text-based formats, decode as UTF-8
+                    body = Buffer.from(bytes).toString('utf-8');
+                }
+            } else if (Array.isArray(output.body)) {
+                // Might be a byte array as plain array
+                if (output.body.every((v: unknown) => typeof v === 'number')) {
+                    const bytes = new Uint8Array(output.body as number[]);
+                    if (mime.startsWith('image/') && mime !== 'image/svg+xml') {
+                        body = Buffer.from(bytes).toString('base64');
+                    } else {
+                        body = Buffer.from(bytes).toString('utf-8');
+                    }
+                } else {
+                    body = JSON.stringify(output.body);
+                }
             } else if (output.body && typeof output.body === 'object') {
+                // Other object types - stringify as fallback
                 body = JSON.stringify(output.body);
             }
         }
 
-        const mime = (output.mime as string) || 'text/plain';
-        console.log(`[PlutoServer] Extracted output: ${body.slice(0, 100)}, mime: ${mime}`);
+        console.log(`[PlutoServer] Extracted output mime: ${mime}, body length: ${body.length}, preview: ${body.slice(0, 50)}`);
         return { body, mime };
+    }
+
+    /**
+     * Try to decode msgpack binary format: {type: 18, data: {0: byte0, 1: byte1, ...}}
+     * Returns { bytes, isBase64 } or null if not in this format
+     * For binary data, always returns base64 to preserve bytes
+     */
+    private tryDecodeMsgpackBinary(body: unknown, mime: string): string | null {
+        console.log(`[PlutoServer] tryDecodeMsgpackBinary: type=${typeof body}, isArray=${Array.isArray(body)}, isUint8Array=${body instanceof Uint8Array}`);
+
+        // Handle Uint8Array or Buffer directly (from msgpack decoder)
+        if (body instanceof Uint8Array || Buffer.isBuffer(body)) {
+            const bytes = body instanceof Uint8Array ? body : new Uint8Array(body);
+            console.log(`[PlutoServer] Direct binary data: ${bytes.length} bytes, first 10: [${Array.from(bytes.slice(0, 10)).join(', ')}]`);
+
+            const isPNG = bytes[0] === 137 && bytes[1] === 80 && bytes[2] === 78 && bytes[3] === 71;
+            const isJPEG = bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255;
+            const isBinaryImage = isPNG || isJPEG || (mime.startsWith('image/') && mime !== 'image/svg+xml');
+
+            if (isBinaryImage) {
+                const result = Buffer.from(bytes).toString('base64');
+                console.log(`[PlutoServer] Direct binary -> base64: ${result.length} chars`);
+                return result;
+            } else {
+                return Buffer.from(bytes).toString('utf-8');
+            }
+        }
+
+        let dataObj: Record<string, number> | null = null;
+
+        // First, try to parse if it's a JSON string
+        let bodyToCheck = body;
+        if (typeof body === 'string') {
+            try {
+                bodyToCheck = JSON.parse(body);
+            } catch {
+                // Not JSON, keep as string
+                return null;
+            }
+        }
+
+        // Check if it's an object with type: 18 and data
+        if (bodyToCheck && typeof bodyToCheck === 'object' && !Array.isArray(bodyToCheck)) {
+            const bodyObj = bodyToCheck as Record<string, unknown>;
+            if (bodyObj.type === 18 && bodyObj.data && typeof bodyObj.data === 'object') {
+                dataObj = bodyObj.data as Record<string, number>;
+            }
+        }
+
+        if (!dataObj) return null;
+
+        // Extract bytes from the data object
+        const allKeys = Object.keys(dataObj);
+        const keys = allKeys.map(k => parseInt(k)).filter(k => !isNaN(k)).sort((a, b) => a - b);
+
+        console.log(`[PlutoServer] Msgpack binary: ${allKeys.length} total keys, ${keys.length} numeric keys`);
+
+        if (keys.length === 0) return null;
+
+        // Check if keys are contiguous
+        const maxKey = keys[keys.length - 1];
+        const minKey = keys[0];
+        console.log(`[PlutoServer] Key range: ${minKey} to ${maxKey}, expected length: ${maxKey - minKey + 1}`);
+
+        const bytes = new Uint8Array(maxKey + 1);
+        for (const key of keys) {
+            bytes[key] = dataObj[String(key)];
+        }
+
+        console.log(`[PlutoServer] Decoded msgpack binary for ${mime}: ${bytes.length} bytes, first 10: [${Array.from(bytes.slice(0, 10)).join(', ')}]`);
+
+        // Check if this looks like binary data (PNG, JPEG, etc.) by checking magic bytes
+        const isPNG = bytes[0] === 137 && bytes[1] === 80 && bytes[2] === 78 && bytes[3] === 71;
+        const isJPEG = bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255;
+        const isBinaryImage = isPNG || isJPEG || (mime.startsWith('image/') && mime !== 'image/svg+xml');
+
+        // Decode as base64 for binary images, UTF-8 for text (SVG, HTML, etc.)
+        let result: string;
+        if (isBinaryImage) {
+            result = Buffer.from(bytes).toString('base64');
+            console.log(`[PlutoServer] Base64 encoded (binary image detected): ${result.length} chars`);
+        } else {
+            result = Buffer.from(bytes).toString('utf-8');
+        }
+
+        console.log(`[PlutoServer] Decoded msgpack binary: ${bytes.length} bytes -> ${result.length} chars`);
+        return result;
     }
 
     /**
@@ -503,6 +634,21 @@ export class PlutoServer extends EventEmitter {
     async runCell(cellId: string): Promise<void> {
         this.sendMessage('run_multiple_cells', {
             cells: [cellId],
+        });
+    }
+
+    /**
+     * Set a bond value (for interactive widgets like Slider)
+     * This triggers reactive execution of dependent cells
+     */
+    async setBond(name: string, value: unknown): Promise<void> {
+        console.log(`[PlutoServer] Setting bond ${name} to`, value);
+        this.sendMessage('update_notebook', {
+            updates: [{
+                path: ['bonds', name],
+                op: 'replace',
+                value: { value },
+            }],
         });
     }
 
@@ -516,13 +662,18 @@ export class PlutoServer extends EventEmitter {
 
     /**
      * Add a new cell to the notebook
+     * Note: This only adds the cell_input. The cell_order is managed by Pluto automatically
+     * when the notebook is saved/synced.
      */
     async addCell(cellId: string, index: number, code: string = ''): Promise<void> {
         console.log(`[PlutoServer] Adding cell ${cellId} at index ${index}`);
 
-        // Send updates to add the cell_input and update cell_order
+        // First, add the cell to cell_inputs with its full structure
+        // Then add to cell_order
+        // This mimics how Pluto's frontend handles cell addition
         this.sendMessage('update_notebook', {
             updates: [
+                // Add to cell_inputs first
                 {
                     path: ['cell_inputs', cellId],
                     op: 'add',
@@ -532,18 +683,34 @@ export class PlutoServer extends EventEmitter {
                         code_folded: false,
                         metadata: {
                             disabled: false,
-                            show_logs: true,
-                            skip_as_script: false,
                         },
                     },
                 },
+                // Then add to cell_order
+                // Note: We use 'add' with path ending in '-' to append,
+                // or we need to replace the entire array
                 {
-                    path: ['cell_order', index],
-                    op: 'add',
-                    value: cellId,
+                    path: ['cell_order'],
+                    op: 'replace',
+                    value: this.getCellOrderWithNewCell(cellId, index),
                 },
             ],
         });
+
+        // Track this cell as known
+        this.knownCellIds.add(cellId);
+    }
+
+    /**
+     * Get the current cell order with a new cell inserted at the given index
+     */
+    private getCellOrderWithNewCell(cellId: string, index: number): string[] {
+        const newOrder = [...this.cellOrder];
+        // Insert at the specified index
+        newOrder.splice(index, 0, cellId);
+        // Update our tracked order
+        this.cellOrder = newOrder;
+        return newOrder;
     }
 
     /**
@@ -552,15 +719,20 @@ export class PlutoServer extends EventEmitter {
     async deleteCell(cellId: string, index: number): Promise<void> {
         console.log(`[PlutoServer] Deleting cell ${cellId} at index ${index}`);
 
+        // Update local tracking first
+        this.cellOrder = this.cellOrder.filter(id => id !== cellId);
+        this.knownCellIds.delete(cellId);
+
         this.sendMessage('update_notebook', {
             updates: [
                 {
-                    path: ['cell_order', index],
+                    path: ['cell_inputs', cellId],
                     op: 'remove',
                 },
                 {
-                    path: ['cell_inputs', cellId],
-                    op: 'remove',
+                    path: ['cell_order'],
+                    op: 'replace',
+                    value: this.cellOrder,
                 },
             ],
         });
