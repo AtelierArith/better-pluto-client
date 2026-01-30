@@ -18,6 +18,44 @@ A VS Code extension for editing Pluto.jl notebooks with **full native editor sup
 - Pluto.jl package installed (`using Pkg; Pkg.add("Pluto")`)
 - Recommended: [Julia extension](https://marketplace.visualstudio.com/items?itemName=julialang.language-julia)
 
+## Installation
+
+### Install from VSIX Package
+
+1. **Build the VSIX package**:
+   ```bash
+   # Install dependencies
+   yarn install
+
+   # Build the extension
+   yarn compile
+
+   # Create VSIX package
+   npx vsce package
+   ```
+
+2. **Install in VS Code**:
+   ```bash
+   code --install-extension better-pluto-client-0.0.1.vsix
+   ```
+
+3. **Install in Cursor**:
+   ```bash
+   cursor --install-extension better-pluto-client-0.0.1.vsix
+   ```
+
+4. **Reload the editor**: Restart VS Code/Cursor or use `Cmd+Shift+P` → "Developer: Reload Window"
+
+### Uninstall
+
+```bash
+# VS Code
+code --uninstall-extension undefined_publisher.better-pluto-client
+
+# Cursor
+cursor --uninstall-extension undefined_publisher.better-pluto-client
+```
+
 ## Usage
 
 ### Opening a Pluto Notebook
