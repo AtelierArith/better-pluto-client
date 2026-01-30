@@ -30,7 +30,6 @@ A VS Code extension for editing Pluto.jl notebooks with **full native editor sup
    # Build the extension
    yarn compile
 
-   # Create VSIX package
    npx vsce package
    ```
 

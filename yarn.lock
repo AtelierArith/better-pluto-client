@@ -214,6 +214,11 @@
   dependencies:
     undici-types "~6.21.0"
 
+"@types/vscode-notebook-renderer@^1.72.4":
+  version "1.72.4"
+  resolved "https://registry.yarnpkg.com/@types/vscode-notebook-renderer/-/vscode-notebook-renderer-1.72.4.tgz#585439f33139702203704876f6dbaec25997a1b6"
+  integrity sha512-bdKO41c6Dc24pH/O/eM/jqfCwGH4zc76o/g/6Gt1y/eg/bvvqP2/VpbV+Sa5Te2sZekFRcbYnSSFTKo3wcVGUg==
+
 "@types/vscode@^1.80.0":
   version "1.108.1"
   resolved "https://registry.yarnpkg.com/@types/vscode/-/vscode-1.108.1.tgz#ed56b273acd865960cfea8d884e20433d9ed523b"

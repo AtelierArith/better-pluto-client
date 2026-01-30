@@ -5,6 +5,9 @@ node_modules/**
 src/**
 vscode-jupyter/**
 Pluto.jl/**
+PlutoUI.jl/**
+julia-vscode/**
+vscode-marimo/**
 .gitignore
 .yarnrc
 webpack.config.js
