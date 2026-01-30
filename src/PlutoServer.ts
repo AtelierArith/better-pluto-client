@@ -840,6 +840,49 @@ export class PlutoServer extends EventEmitter {
     }
 
     /**
+     * Delete a cell without updating cell_order
+     * Used when cell order will be updated separately (e.g., during move operations)
+     */
+    async deleteCellOnly(cellId: string): Promise<void> {
+        console.log(`[PlutoServer] Deleting cell input only: ${cellId}`);
+
+        this.knownCellIds.delete(cellId);
+
+        this.sendMessage('update_notebook', {
+            updates: [
+                {
+                    path: ['cell_inputs', cellId],
+                    op: 'remove',
+                },
+            ],
+        });
+    }
+
+    /**
+     * Add a cell without updating cell_order
+     * Used when cell order will be updated separately (e.g., during move operations)
+     */
+    async addCellOnly(cellId: string, code: string = ''): Promise<void> {
+        console.log(`[PlutoServer] Adding cell input only: ${cellId}`);
+
+        this.knownCellIds.add(cellId);
+
+        this.sendMessage('update_notebook', {
+            updates: [
+                {
+                    path: ['cell_inputs', cellId],
+                    op: 'add',
+                    value: {
+                        cell_id: cellId,
+                        code: code,
+                        code_folded: false,
+                    },
+                },
+            ],
+        });
+    }
+
+    /**
      * Update cell order (for drag-and-drop reordering)
      * This sends the new cell_order array to Pluto, triggering reactive re-evaluation
      */

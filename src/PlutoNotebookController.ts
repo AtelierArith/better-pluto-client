@@ -248,23 +248,20 @@ class PlutoKernel {
     async handleNotebookChange(e: vscode.NotebookDocumentChangeEvent): Promise<void> {
         if (!this._isRunning) return;
 
-        let hasStructuralChange = false;
+        const removedCellIds: string[] = [];
+        const addedCellIds: string[] = [];
 
-        // Handle removed cells
+        // Collect removed and added cells
         for (const change of e.contentChanges) {
             for (const cell of change.removedCells) {
                 const cellId = getCellId(cell);
                 if (cellId) {
-                    const index = change.range.start;
-                    console.log(`[PlutoKernel] Removing cell ${cellId} at index ${index}`);
-                    await this.server.deleteCell(cellId, index);
+                    removedCellIds.push(cellId);
                     this.knownCellIds.delete(cellId);
                     this.cellOutputs.delete(cellId);
-                    hasStructuralChange = true;
                 }
             }
 
-            // Handle added cells
             for (let i = 0; i < change.addedCells.length; i++) {
                 const cell = change.addedCells[i];
                 let cellId = getCellId(cell);
@@ -274,26 +271,51 @@ class PlutoKernel {
                     await setCellId(cell, cellId);
                 }
 
-                const index = change.range.start + i;
-                console.log(`[PlutoKernel] Adding cell ${cellId} at index ${index}`);
-                await this.server.addCell(cellId, index, cell.document.getText());
+                addedCellIds.push(cellId);
                 this.knownCellIds.add(cellId);
-                hasStructuralChange = true;
             }
         }
 
-        // Detect cell reordering: compare current order with server's order
-        // This handles drag-and-drop reordering which doesn't show as add/remove
-        if (!hasStructuralChange && e.contentChanges.length > 0) {
-            await this.syncCellOrderIfChanged();
+        // Detect if this is a move operation (same cells removed and added)
+        const isMove = removedCellIds.length > 0 &&
+                       addedCellIds.length > 0 &&
+                       removedCellIds.length === addedCellIds.length &&
+                       removedCellIds.every(id => addedCellIds.includes(id));
+
+        if (isMove) {
+            // For move operations, just update the cell order
+            console.log('[PlutoKernel] Cell move detected, updating order');
+            await this.syncCellOrder();
+        } else {
+            // Handle actual additions and removals
+            for (const cellId of removedCellIds) {
+                if (!addedCellIds.includes(cellId)) {
+                    console.log(`[PlutoKernel] Removing cell ${cellId}`);
+                    await this.server.deleteCellOnly(cellId);
+                }
+            }
+
+            for (const change of e.contentChanges) {
+                for (let i = 0; i < change.addedCells.length; i++) {
+                    const cell = change.addedCells[i];
+                    const cellId = getCellId(cell);
+                    if (cellId && !removedCellIds.includes(cellId)) {
+                        const index = change.range.start + i;
+                        console.log(`[PlutoKernel] Adding cell ${cellId} at index ${index}`);
+                        await this.server.addCellOnly(cellId, cell.document.getText());
+                    }
+                }
+            }
+
+            // Always sync the full cell order after structural changes
+            await this.syncCellOrder();
         }
     }
 
     /**
-     * Sync cell order with Pluto if it has changed
-     * This handles drag-and-drop reordering
+     * Sync current cell order with Pluto server
      */
-    private async syncCellOrderIfChanged(): Promise<void> {
+    private async syncCellOrder(): Promise<void> {
         // Get current cell order from notebook
         const currentOrder: string[] = [];
         for (let i = 0; i < this.notebook.cellCount; i++) {
@@ -304,20 +326,16 @@ class PlutoKernel {
             }
         }
 
-        // Get server's cell order
         const serverOrder = this.server.getCellOrder();
 
-        // Check if order has changed (same cells, different order)
-        if (currentOrder.length === serverOrder.length) {
-            const sameContent = currentOrder.every(id => serverOrder.includes(id));
-            const sameOrder = currentOrder.every((id, idx) => serverOrder[idx] === id);
+        // Only update if order actually changed
+        const sameOrder = currentOrder.length === serverOrder.length &&
+                          currentOrder.every((id, idx) => serverOrder[idx] === id);
 
-            if (sameContent && !sameOrder) {
-                console.log('[PlutoKernel] Cell order changed, syncing with Pluto');
-                console.log('[PlutoKernel] Old order:', serverOrder);
-                console.log('[PlutoKernel] New order:', currentOrder);
-                await this.server.updateCellOrder(currentOrder);
-            }
+        if (!sameOrder) {
+            console.log('[PlutoKernel] Syncing cell order with Pluto');
+            console.log('[PlutoKernel] Current order:', currentOrder);
+            await this.server.updateCellOrder(currentOrder);
         }
     }
 
