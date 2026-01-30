@@ -673,6 +673,15 @@ export class PlutoServer extends EventEmitter {
     }
 
     /**
+     * Run multiple cells at once (more efficient for Run All)
+     */
+    async runMultipleCells(cellIds: string[]): Promise<void> {
+        this.sendMessage('run_multiple_cells', {
+            cells: cellIds,
+        });
+    }
+
+    /**
      * Set a bond value (for interactive widgets like Slider)
      * This triggers reactive execution of dependent cells
      */
