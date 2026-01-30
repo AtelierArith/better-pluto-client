@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width" />
+    <meta name="color-scheme" content="light dark">
+
+    <!-- Pluto.jl styles - loaded from local copy -->
+    <style id="pluto-styles">
+        /* Will be injected */
+    </style>
+
+    <!-- VS Code Webview API -->
+    <script>
+        const vscode = acquireVsCodeApi();
+    </script>
+</head>
+<body>
+    <div id="loading">Loading Pluto.jl frontend...</div>
+
+    <pluto-editor class="loading fullscreen" translate="no" skip-custom-element>
+    </pluto-editor>
+
+    <script type="module">
+        // Import Pluto.jl frontend components from CDN
+        import { html, render, useState, useEffect, useRef, Component, createContext, useContext } from "https://esm.sh/preact@10.27.2?pin=v113&target=es2020";
+        import { useCallback, useMemo, useLayoutEffect, useErrorBoundary } from "https://esm.sh/preact@10.27.2/hooks?pin=v113&target=es2020";
+        import htm from "https://esm.sh/htm@3.1.1?pin=v113&target=es2020";
+
+        const h = htm.bind(html);
+
+        // Notify VS Code that we're ready
+        document.getElementById('loading').textContent = 'Pluto.jl frontend loaded!';
+
+        // Simple cell renderer for testing
+        const CellDisplay = ({ cell_id, code, output }) => {
+            return html`
+                <div class="pluto-cell" style="border: 1px solid #ccc; margin: 10px; padding: 10px; border-radius: 8px;">
+                    <div class="cell-id" style="font-size: 10px; color: #888;">${cell_id}</div>
+                    <pre style="background: #f5f5f5; padding: 10px; border-radius: 4px; overflow-x: auto;">${code}</pre>
+                    ${output ? html`<div class="output" style="margin-top: 10px; padding: 10px; background: #e8f5e9; border-radius: 4px;">${output}</div>` : null}
+                </div>
+            `;
+        };
+
+        const PlutoNotebookViewer = ({ notebook }) => {
+            const { cells, cellOrder } = notebook;
+
+            return html`
+                <div class="pluto-notebook" style="max-width: 900px; margin: 0 auto; padding: 20px;">
+                    <h1 style="font-family: system-ui; color: #333;">🎈 Pluto Notebook</h1>
+                    <p style="color: #666;">Version: ${notebook.version} | Cells: ${cellOrder.length}</p>
+                    <hr style="margin: 20px 0;" />
+                    ${cellOrder.map(id => {
+                        const cell = cells.get ? cells.get(id) : cells[id];
+                        return html`<${CellDisplay}
+                            key=${id}
+                            cell_id=${id}
+                            code=${cell?.code || ''}
+                            output=${null}
+                        />`;
+                    })}
+                </div>
+            `;
+        };
+
+        // Listen for notebook data from VS Code extension
+        window.addEventListener('message', event => {
+            const message = event.data;
+            console.log('Received message:', message);
+
+            if (message.type === 'loadNotebook') {
+                const notebook = message.notebook;
+                console.log('Loading notebook:', notebook);
+
+                // Convert cells Map if needed
+                if (!(notebook.cells instanceof Map)) {
+                    notebook.cells = new Map(Object.entries(notebook.cells));
+                }
+
+                const container = document.querySelector('pluto-editor');
+                render(html`<${PlutoNotebookViewer} notebook=${notebook} />`, container);
+                document.getElementById('loading').style.display = 'none';
+            }
+        });
+
+        // Request notebook data
+        vscode.postMessage({ type: 'requestNotebook' });
+    </script>
+</body>
+</html>
