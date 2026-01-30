@@ -1,4 +1,4 @@
-# Modern Pluto Client - VS Code Extension
+# BetterPlutoClient - VS Code Extension
 
 ## プロジェクト概要
 
