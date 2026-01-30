@@ -12,6 +12,11 @@ interface PlutoBondMessage {
     value: unknown;
 }
 
+interface PlutoShowMoreMessage {
+    type: 'showMore';
+    objectid: string;
+}
+
 /**
  * Activate the renderer
  */
@@ -73,6 +78,9 @@ function setupInteractiveElements(container: HTMLElement, context: RendererConte
     // Handle Pluto's standard HTML structure for sliders
     // PlutoUI wraps inputs in specific structures
     setupPlutoUISliders(container, context);
+
+    // Handle "show more" buttons in tree views
+    setupShowMoreButtons(container, context);
 }
 
 /**
@@ -200,4 +208,46 @@ function findBondNameFromParents(element: HTMLElement): string | null {
     }
 
     return null;
+}
+
+/**
+ * Setup handlers for "show more" buttons in tree views
+ */
+function setupShowMoreButtons(container: HTMLElement, context: RendererContext<void>) {
+    const moreButtons = container.querySelectorAll('pluto-tree-more');
+
+    moreButtons.forEach((button) => {
+        const moreBtn = button as HTMLElement;
+        const objectid = moreBtn.getAttribute('data-objectid');
+
+        if (objectid) {
+            console.log(`[PlutoRenderer] Found "show more" button with objectid: ${objectid}`);
+
+            moreBtn.style.cursor = 'pointer';
+            moreBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                console.log(`[PlutoRenderer] "show more" clicked, objectid: ${objectid}`);
+
+                // Update button state
+                moreBtn.textContent = 'loading...';
+                moreBtn.style.opacity = '0.5';
+
+                // Send message to extension
+                if (context.postMessage) {
+                    context.postMessage({
+                        type: 'showMore',
+                        objectid: objectid
+                    } as PlutoShowMoreMessage);
+                }
+            });
+        } else {
+            // No objectid - show not supported message on click
+            moreBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                moreBtn.textContent = '(expand not yet supported)';
+                moreBtn.style.cursor = 'default';
+                moreBtn.style.opacity = '0.4';
+            });
+        }
+    });
 }

@@ -177,7 +177,7 @@ function setupRendererMessaging(context: vscode.ExtensionContext) {
     const messaging = vscode.notebooks.createRendererMessaging('pluto-html-renderer');
 
     const disposable = messaging.onDidReceiveMessage(e => {
-        const message = e.message as { type: string; name?: string; value?: unknown };
+        const message = e.message as { type: string; name?: string; value?: unknown; objectid?: string };
         console.log('[PlutoExtension] Received renderer message:', message);
 
         if (message.type === 'setBond' && message.name !== undefined) {
@@ -187,6 +187,14 @@ function setupRendererMessaging(context: vscode.ExtensionContext) {
                 controller.setBond(notebook, message.name, message.value);
             } else {
                 console.log('[PlutoExtension] No notebook or controller found');
+            }
+        } else if (message.type === 'showMore' && message.objectid) {
+            // Handle "show more" request from tree view
+            const notebook = e.editor.notebook;
+            if (notebook && controller) {
+                controller.getPublishedObject(notebook, message.objectid);
+            } else {
+                console.log('[PlutoExtension] No notebook or controller found for showMore');
             }
         }
     });
