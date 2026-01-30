@@ -1,0 +1,10 @@
+out
+dist
+node_modules
+.vscode-test/
+*.vsix
+
+# Reference implementations (for local development only)
+Pluto.jl/
+vscode-jupyter/
+vscode-marimo/

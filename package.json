@@ -1,0 +1,119 @@
+{
+  "name": "modern-pluto-client",
+  "displayName": "ModernPlutoClient",
+  "description": "View and edit Pluto.jl notebooks in VS Code with native notebook support",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Notebooks",
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onNotebook:pluto-notebook",
+    "onCommand:pluto-notebook.openAsPlutoNotebook"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "notebooks": [
+      {
+        "type": "pluto-notebook",
+        "displayName": "Pluto Notebook",
+        "priority": "option",
+        "selector": [
+          {
+            "filenamePattern": "*.jl"
+          }
+        ]
+      }
+    ],
+    "commands": [
+      {
+        "command": "pluto-notebook.openAsPlutoNotebook",
+        "title": "Open as Pluto Notebook",
+        "category": "Pluto"
+      },
+      {
+        "command": "pluto-notebook.startKernel",
+        "title": "Start Pluto Kernel",
+        "category": "Pluto",
+        "icon": "$(play)"
+      },
+      {
+        "command": "pluto-notebook.stopKernel",
+        "title": "Stop Pluto Kernel",
+        "category": "Pluto",
+        "icon": "$(stop)"
+      },
+      {
+        "command": "pluto-notebook.restartKernel",
+        "title": "Restart Pluto Kernel",
+        "category": "Pluto",
+        "icon": "$(refresh)"
+      }
+    ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "pluto-notebook.openAsPlutoNotebook",
+          "when": "resourceExtname == .jl",
+          "group": "navigation"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "pluto-notebook.openAsPlutoNotebook",
+          "when": "resourceExtname == .jl",
+          "group": "navigation"
+        }
+      ],
+      "notebook/toolbar": [
+        {
+          "command": "pluto-notebook.startKernel",
+          "when": "notebookType == pluto-notebook && !pluto.kernelRunning",
+          "group": "navigation/execute@1"
+        },
+        {
+          "command": "pluto-notebook.stopKernel",
+          "when": "notebookType == pluto-notebook && pluto.kernelRunning",
+          "group": "navigation/execute@1"
+        },
+        {
+          "command": "pluto-notebook.restartKernel",
+          "when": "notebookType == pluto-notebook && pluto.kernelRunning",
+          "group": "navigation/execute@2"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "yarn run package",
+    "compile": "webpack",
+    "watch": "webpack --watch",
+    "package": "webpack --mode production --devtool hidden-source-map",
+    "compile-tests": "tsc -p . --outDir out",
+    "watch-tests": "tsc -p . -w --outDir out",
+    "pretest": "yarn run compile-tests && yarn run compile && yarn run lint",
+    "lint": "eslint src",
+    "test": "vscode-test"
+  },
+  "dependencies": {
+    "@msgpack/msgpack": "^3.0.0-beta2",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.80.0",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "22.x",
+    "@types/ws": "^8.5.10",
+    "typescript-eslint": "^8.52.0",
+    "eslint": "^9.39.2",
+    "typescript": "^5.9.3",
+    "ts-loader": "^9.5.4",
+    "webpack": "^5.104.1",
+    "webpack-cli": "^6.0.1",
+    "@vscode/test-cli": "^0.0.12",
+    "@vscode/test-electron": "^2.5.2"
+  }
+}
