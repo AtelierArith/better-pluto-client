@@ -7,6 +7,15 @@ import { createConnection, Socket } from 'net';
 import { encode, decode } from '@msgpack/msgpack';
 import { EventEmitter } from 'events';
 
+/**
+ * Check if a string is a Pluto objectid (12-20 character hex string)
+ */
+function isPlutoObjectId(str: string | undefined | null): boolean {
+    if (!str) return false;
+    const trimmed = str.trim();
+    return /^[0-9a-f]{12,20}$/i.test(trimmed);
+}
+
 export interface LogEntry {
     level: string;
     msg: string;
@@ -50,9 +59,19 @@ export class PlutoServer extends EventEmitter {
     private knownCellIds = new Set<string>();
     private cellOrder: string[] = [];
 
+    // Track pending get_published_object requests
+    private pendingObjectRequests: Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }> = new Map();
+
     constructor() {
         super();
         this.clientId = this.generateId();
+    }
+
+    /**
+     * Get the current cell order tracked by the server
+     */
+    getCellOrder(): string[] {
+        return [...this.cellOrder];
     }
 
     /**
@@ -257,6 +276,8 @@ export class PlutoServer extends EventEmitter {
                 console.log('[PlutoServer] Got welcome message from Pluto');
             } else if (type === 'notebook_diff') {
                 this.handleNotebookDiff(message);
+            } else if (type === 'object_result') {
+                this.handleObjectResult(message);
             }
         } catch (err) {
             console.error('[PlutoServer] Error handling message:', err);
@@ -475,8 +496,8 @@ export class PlutoServer extends EventEmitter {
 
             // For tree+object, don't overwrite existing data with just an objectid
             const isObjectIdOnly = output.mime === 'application/vnd.pluto.tree+object' &&
-                                   newBody && /^[0-9a-f]{16}$/i.test(newBody);
-            if (isObjectIdOnly && output.body && output.body.length > 16) {
+                                   isPlutoObjectId(newBody);
+            if (isObjectIdOnly && output.body && output.body.length > 20) {
                 console.log(`[PlutoServer] Cell ${cellId} skipping objectid-only update, keeping existing tree data`);
                 return; // Don't emit update
             }
@@ -667,6 +688,72 @@ export class PlutoServer extends EventEmitter {
     }
 
     /**
+     * Get a published object by its objectid
+     * Used to expand "show more" in tree views
+     */
+    async getPublishedObject(objectid: string): Promise<unknown> {
+        console.log(`[PlutoServer] Getting published object: ${objectid}`);
+
+        return new Promise((resolve, reject) => {
+            const requestId = this.generateId();
+            this.pendingObjectRequests.set(requestId, { resolve, reject });
+
+            // Send the request
+            if (!this.ws) {
+                reject(new Error('WebSocket not initialized'));
+                return;
+            }
+
+            const socket = this.ws as any;
+            if (socket.readyState !== 1) {
+                reject(new Error('WebSocket not open'));
+                return;
+            }
+
+            const message = {
+                type: 'get_published_object',
+                client_id: this.clientId,
+                request_id: requestId,
+                body: { objectid },
+                notebook_id: this.notebookId,
+            };
+
+            console.log('[PlutoServer] Sending get_published_object request:', requestId);
+            const encoded = encode(message);
+            socket.send(Buffer.from(encoded));
+
+            // Timeout after 10 seconds
+            setTimeout(() => {
+                if (this.pendingObjectRequests.has(requestId)) {
+                    this.pendingObjectRequests.delete(requestId);
+                    reject(new Error('Timeout waiting for published object'));
+                }
+            }, 10000);
+        });
+    }
+
+    /**
+     * Handle object_result response from Pluto
+     */
+    private handleObjectResult(message: Record<string, unknown>): void {
+        const requestId = message.request_id as string;
+        const body = message.body as Record<string, unknown>;
+
+        console.log('[PlutoServer] Received object_result for request:', requestId);
+
+        const pending = this.pendingObjectRequests.get(requestId);
+        if (pending) {
+            this.pendingObjectRequests.delete(requestId);
+
+            if (body?.success === false) {
+                pending.reject(new Error(body.message as string || 'Failed to get object'));
+            } else {
+                pending.resolve(body?.object);
+            }
+        }
+    }
+
+    /**
      * Interrupt all running cells
      */
     async interruptAll(): Promise<void> {
@@ -747,6 +834,28 @@ export class PlutoServer extends EventEmitter {
                     path: ['cell_order'],
                     op: 'replace',
                     value: this.cellOrder,
+                },
+            ],
+        });
+    }
+
+    /**
+     * Update cell order (for drag-and-drop reordering)
+     * This sends the new cell_order array to Pluto, triggering reactive re-evaluation
+     */
+    async updateCellOrder(newOrder: string[]): Promise<void> {
+        console.log(`[PlutoServer] Updating cell order: ${newOrder.length} cells`);
+
+        // Update local tracking
+        this.cellOrder = newOrder;
+
+        // Send the update to Pluto - this will trigger reactive re-evaluation
+        this.sendMessage('update_notebook', {
+            updates: [
+                {
+                    path: ['cell_order'],
+                    op: 'replace',
+                    value: newOrder,
                 },
             ],
         });
