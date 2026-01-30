@@ -3,6 +3,10 @@
   "displayName": "BetterPlutoClient",
   "description": "View and edit Pluto.jl notebooks in VS Code with native notebook support",
   "version": "0.0.1",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AtelierArith/better-pluto-client.git"
+  },
   "engines": {
     "vscode": "^1.80.0"
   },
