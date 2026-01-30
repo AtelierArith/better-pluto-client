@@ -34,7 +34,7 @@ const extensionConfig = {
     rules: [
       {
         test: /\.ts$/,
-        exclude: /node_modules/,
+        exclude: [/node_modules/, /pluto-renderer\.ts$/],
         use: [
           {
             loader: 'ts-loader'
@@ -72,7 +72,10 @@ const rendererConfig = {
         exclude: /node_modules/,
         use: [
           {
-            loader: 'ts-loader'
+            loader: 'ts-loader',
+            options: {
+              configFile: 'tsconfig.renderer.json'
+            }
           }
         ]
       }

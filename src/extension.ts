@@ -41,6 +41,9 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(controller);
     console.log('[PlutoExtension] Notebook controller registered');
 
+    // Setup renderer messaging for interactive widgets (Slider, etc.)
+    setupRendererMessaging(context);
+
     console.log('[PlutoExtension] Extension activation complete');
 
     // Register commands
@@ -164,6 +167,32 @@ function getActiveNotebook(): vscode.NotebookDocument | undefined {
         return notebookEditor.notebook;
     }
     return undefined;
+}
+
+/**
+ * Setup messaging between the HTML renderer and extension
+ * for interactive widgets like Slider
+ */
+function setupRendererMessaging(context: vscode.ExtensionContext) {
+    const messaging = vscode.notebooks.createRendererMessaging('pluto-html-renderer');
+
+    const disposable = messaging.onDidReceiveMessage(e => {
+        const message = e.message as { type: string; name?: string; value?: unknown };
+        console.log('[PlutoExtension] Received renderer message:', message);
+
+        if (message.type === 'setBond' && message.name !== undefined) {
+            // Find the notebook that contains this editor
+            const notebook = e.editor.notebook;
+            if (notebook && controller) {
+                controller.setBond(notebook, message.name, message.value);
+            } else {
+                console.log('[PlutoExtension] No notebook or controller found');
+            }
+        }
+    });
+
+    context.subscriptions.push(disposable);
+    console.log('[PlutoExtension] Renderer messaging setup complete');
 }
 
 export function deactivate() {

@@ -22,7 +22,7 @@
         "displayName": "Pluto HTML Renderer",
         "entrypoint": "./dist/pluto-renderer.js",
         "mimeTypes": [
-          "text/html"
+          "application/vnd.pluto.html+html"
         ],
         "requiresMessaging": "always"
       }
