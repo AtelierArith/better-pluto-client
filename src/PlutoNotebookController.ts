@@ -294,9 +294,16 @@ class PlutoKernel {
         const existingOutput = this.cellOutputs.get(cellId) || {};
 
         if (state.output) {
-            existingOutput.body = state.output.body;
-            existingOutput.mime = state.output.mime;
-            console.log(`[PlutoKernel] Cell ${cellId} output: ${existingOutput.body?.slice(0, 100)}`);
+            // For tree+object, don't overwrite existing data with just an objectid
+            const isObjectIdOnly = state.output.mime === 'application/vnd.pluto.tree+object' &&
+                                   /^[0-9a-f]{16}$/i.test(state.output.body);
+            if (isObjectIdOnly && existingOutput.body && existingOutput.mime === 'application/vnd.pluto.tree+object') {
+                console.log(`[PlutoKernel] Cell ${cellId} skipping objectid-only update, keeping existing tree data`);
+            } else {
+                existingOutput.body = state.output.body;
+                existingOutput.mime = state.output.mime;
+                console.log(`[PlutoKernel] Cell ${cellId} output: ${existingOutput.body?.slice(0, 100)}`);
+            }
         }
 
         if (state.logs) {
@@ -351,15 +358,19 @@ class PlutoKernel {
                     vscode.NotebookCellOutputItem.stderr(existingOutput.body)
                 ]));
             } else if (mime === 'application/vnd.pluto.tree+object') {
-                // Pluto's tree object format - convert to readable text
-                const displayText = this.parsePlutoTreeObject(existingOutput.body);
+                // Pluto's tree object format - render as collapsible HTML
+                const treeHtml = this.renderPlutoTreeAsHtml(existingOutput.body);
                 outputs.push(new vscode.NotebookCellOutput([
-                    vscode.NotebookCellOutputItem.text(displayText, 'text/plain')
+                    vscode.NotebookCellOutputItem.text(treeHtml, 'text/html')
                 ]));
             } else if (mime === 'text/html') {
-                // Render HTML
+                // Render HTML - use custom MIME type for Pluto HTML with bonds
+                // This triggers our custom renderer which handles interactive elements
+                const plutoMime = existingOutput.body.includes('<bond')
+                    ? 'application/vnd.pluto.html+html'
+                    : 'text/html';
                 outputs.push(new vscode.NotebookCellOutput([
-                    vscode.NotebookCellOutputItem.text(existingOutput.body, 'text/html')
+                    vscode.NotebookCellOutputItem.text(existingOutput.body, plutoMime)
                 ]));
             } else if (mime === 'image/svg+xml') {
                 // SVG is text-based, render as SVG (like julia-vscode)
@@ -496,15 +507,19 @@ class PlutoKernel {
                     vscode.NotebookCellOutputItem.stderr(existingOutput.body)
                 ]));
             } else if (mime === 'application/vnd.pluto.tree+object') {
-                // Pluto's tree object format - convert to readable text
-                const displayText = this.parsePlutoTreeObject(existingOutput.body);
+                // Pluto's tree object format - render as collapsible HTML
+                const treeHtml = this.renderPlutoTreeAsHtml(existingOutput.body);
                 outputs.push(new vscode.NotebookCellOutput([
-                    vscode.NotebookCellOutputItem.text(displayText, 'text/plain')
+                    vscode.NotebookCellOutputItem.text(treeHtml, 'text/html')
                 ]));
             } else if (mime === 'text/html') {
-                // Render HTML
+                // Render HTML - use custom MIME type for Pluto HTML with bonds
+                // This triggers our custom renderer which handles interactive elements
+                const plutoMime = existingOutput.body.includes('<bond')
+                    ? 'application/vnd.pluto.html+html'
+                    : 'text/html';
                 outputs.push(new vscode.NotebookCellOutput([
-                    vscode.NotebookCellOutputItem.text(existingOutput.body, 'text/html')
+                    vscode.NotebookCellOutputItem.text(existingOutput.body, plutoMime)
                 ]));
             } else if (mime === 'image/svg+xml') {
                 // SVG is text-based, render as SVG
@@ -623,6 +638,316 @@ class PlutoKernel {
             // If parsing fails, return as-is (might be plain text)
             return body;
         }
+    }
+
+    /**
+     * Render Pluto's tree object as collapsible HTML
+     * This creates an interactive tree view identical to Pluto.jl
+     */
+    private renderPlutoTreeAsHtml(body: string): string {
+        // Check if body is just an objectid (hex string)
+        if (/^[0-9a-f]{16}$/i.test(body)) {
+            return '<span style="color: #888; font-style: italic;">(computing...)</span>';
+        }
+
+        try {
+            const treeObj = JSON.parse(body);
+            const treeHtml = this.renderPlutoTree(treeObj, true);
+
+            // Wrap with Pluto-identical styles
+            return `
+<style>
+/* Pluto.jl TreeView CSS - identical to treeview.css */
+:root {
+    --pluto-tree-color: #1a1a1a;
+    --pluto-output-color: #1a1a1a;
+    --julia-mono-font-stack: "JuliaMono", "Fira Code", "Roboto Mono", monospace;
+}
+@media (prefers-color-scheme: dark) {
+    :root {
+        --pluto-tree-color: #e0e0e0;
+        --pluto-output-color: #e0e0e0;
+    }
+}
+
+pluto-tree, pluto-tree-pair {
+    font-family: var(--julia-mono-font-stack);
+    font-size: 0.75rem;
+}
+pluto-tree {
+    color: var(--pluto-tree-color);
+    white-space: pre;
+    cursor: pointer;
+}
+pluto-tree, pluto-tree-items {
+    display: inline-flex;
+    flex-direction: column;
+    align-items: flex-start;
+}
+pluto-tree.collapsed, pluto-tree.collapsed pluto-tree, pluto-tree.collapsed pluto-tree-items {
+    flex-direction: row;
+    align-items: baseline;
+}
+pluto-tree-items {
+    cursor: auto;
+}
+pluto-tree-prefix {
+    display: inline-flex;
+    flex-direction: row;
+    align-items: baseline;
+}
+
+/* Caret icons */
+pluto-tree > pluto-tree-prefix::before {
+    display: inline-block;
+    position: relative;
+    content: "▼";
+    font-size: 0.6em;
+    margin-right: 0.5em;
+    opacity: 0.5;
+    cursor: pointer;
+    transition: transform 0.1s;
+}
+pluto-tree.collapsed > pluto-tree-prefix::before {
+    content: "▶";
+}
+pluto-tree.collapsed pluto-tree > pluto-tree-prefix::before {
+    display: none;
+}
+
+pluto-tree p-r > p-v {
+    display: inline-flex;
+    color: var(--pluto-output-color);
+}
+
+/* Hide indices when collapsed */
+pluto-tree.collapsed pluto-tree-items.Array > p-r > p-k,
+pluto-tree.collapsed pluto-tree-items.Set > p-r > p-k,
+pluto-tree.collapsed pluto-tree-items.Tuple > p-r > p-k,
+pluto-tree.collapsed pluto-tree-items.struct > p-r > p-k {
+    display: none;
+}
+
+/* Short/Long prefix toggle */
+pluto-tree > pluto-tree-prefix > .long { display: block; }
+pluto-tree > pluto-tree-prefix > .short { display: none; }
+pluto-tree.collapsed > pluto-tree-prefix > .long { display: none; }
+pluto-tree.collapsed > pluto-tree-prefix > .short { display: block; }
+
+/* Indentation */
+pluto-tree p-r { margin-left: 1.5em; }
+pluto-tree.collapsed p-r { margin-left: 0.5em; }
+pluto-tree.collapsed p-r:first-child { margin-left: 0; }
+
+/* Index styling */
+pluto-tree pluto-tree-items.Array > p-r > p-k,
+pluto-tree pluto-tree-items.Set > p-r > p-k,
+pluto-tree pluto-tree-items.Tuple > p-r > p-k {
+    margin-right: 0.5em;
+    opacity: 0.5;
+    user-select: none;
+}
+
+/* Brackets - Array */
+pluto-tree.Array > pluto-tree-prefix::after { content: "["; }
+pluto-tree pluto-tree-items.Array::after { content: "]"; }
+
+/* Brackets - Set */
+pluto-tree.Set > pluto-tree-prefix::after { content: "(["; }
+pluto-tree pluto-tree-items.Set::after { content: "])"; }
+
+/* Brackets - Tuple, Dict, NamedTuple, struct */
+pluto-tree.Tuple > pluto-tree-prefix::after,
+pluto-tree.Dict > pluto-tree-prefix::after,
+pluto-tree.NamedTuple > pluto-tree-prefix::after,
+pluto-tree.struct > pluto-tree-prefix::after { content: "("; }
+pluto-tree pluto-tree-items.Tuple::after,
+pluto-tree pluto-tree-items.Dict::after,
+pluto-tree pluto-tree-items.NamedTuple::after,
+pluto-tree pluto-tree-items.struct::after { content: ")"; }
+
+/* Separators */
+pluto-tree pluto-tree-items.Array > p-r > p-k::after,
+pluto-tree pluto-tree-items.Set > p-r > p-k::after,
+pluto-tree pluto-tree-items.Tuple > p-r > p-k::after { content: ":"; }
+pluto-tree-pair > p-r > p-k::after,
+pluto-tree pluto-tree-items.Dict > p-r > p-k::after { content: " => "; }
+pluto-tree pluto-tree-items.NamedTuple > p-r > p-k::after,
+pluto-tree pluto-tree-items.struct > p-r > p-k::after { content: " = "; }
+
+/* Commas when collapsed */
+pluto-tree.collapsed p-r::after { content: ", "; }
+pluto-tree.collapsed p-r:last-child::after { content: ""; }
+
+/* More button */
+pluto-tree-more {
+    display: inline-block;
+    padding: 0.3em 0;
+    cursor: pointer;
+    opacity: 0.6;
+}
+pluto-tree-more::before {
+    content: "⋮";
+    margin-right: 0.3em;
+}
+pluto-tree.collapsed pluto-tree-more::before {
+    content: "⋯";
+}
+</style>
+<script>
+document.addEventListener('click', function(e) {
+    const tree = e.target.closest('pluto-tree');
+    const prefix = e.target.closest('pluto-tree-prefix');
+    if (tree && (prefix || e.target === tree)) {
+        const parent = tree.parentElement?.closest('pluto-tree');
+        if (parent && parent.classList.contains('collapsed')) return;
+        tree.classList.toggle('collapsed');
+    }
+});
+</script>
+${treeHtml}`;
+        } catch (e) {
+            console.log('[PlutoKernel] Tree HTML render error:', e);
+            return `<pre>${this.escapeHtml(body)}</pre>`;
+        }
+    }
+
+    /**
+     * Render a Pluto tree node - identical to Pluto.jl TreeView component
+     */
+    private renderPlutoTree(obj: unknown, isRoot: boolean = false): string {
+        if (obj === null || obj === undefined) {
+            return '<span>nothing</span>';
+        }
+        if (typeof obj === 'string') {
+            return `<span>${this.escapeHtml(obj)}</span>`;
+        }
+        if (typeof obj === 'number' || typeof obj === 'boolean') {
+            return `<span>${obj}</span>`;
+        }
+
+        if (typeof obj !== 'object') {
+            return `<span>${this.escapeHtml(String(obj))}</span>`;
+        }
+
+        const record = obj as Record<string, unknown>;
+
+        // Mimepair output helper
+        const mimepairOutput = (pair: unknown): string => {
+            if (!Array.isArray(pair) || pair.length !== 2) {
+                return this.renderPlutoTree(pair, false);
+            }
+            const [body, mime] = pair;
+            if (mime === 'application/vnd.pluto.tree+object' && body && typeof body === 'object') {
+                return this.renderPlutoTree(body, false);
+            }
+            if (typeof body === 'string') {
+                return `<span>${this.escapeHtml(body)}</span>`;
+            }
+            return this.renderPlutoTree(body, false);
+        };
+
+        const plutoType = record.type as string | undefined;
+        const prefix = record.prefix as string | undefined;
+        const prefixShort = record.prefix_short as string | undefined;
+        const collapsedClass = isRoot ? '' : ' collapsed';
+
+        // Handle Pair type
+        if (plutoType === 'Pair' && 'key_value' in record) {
+            const kv = record.key_value as unknown[];
+            if (Array.isArray(kv) && kv.length === 2) {
+                return `<pluto-tree-pair><p-r><p-k>${mimepairOutput(kv[0])}</p-k><p-v>${mimepairOutput(kv[1])}</p-v></p-r></pluto-tree-pair>`;
+            }
+        }
+
+        // Handle circular reference
+        if (plutoType === 'circular') {
+            return '<span style="opacity: 0.5;">circular reference</span>';
+        }
+
+        // Handle collections
+        if ('elements' in record && Array.isArray(record.elements)) {
+            const elements = record.elements as unknown[];
+            const typeClass = plutoType || 'Array';
+
+            const prefixHtml = `<pluto-tree-prefix><span class="long">${this.escapeHtml(prefix || '')}</span><span class="short">${this.escapeHtml(prefixShort || prefix || '')}</span></pluto-tree-prefix>`;
+
+            let itemsHtml = '';
+
+            switch (plutoType) {
+                case 'Array':
+                case 'Set':
+                case 'Tuple':
+                    itemsHtml = elements.map(r => {
+                        if (r === 'more') {
+                            return '<pluto-tree-more>show more</pluto-tree-more>';
+                        }
+                        const el = r as unknown[];
+                        if (!Array.isArray(el) || el.length !== 2) return '';
+                        const indexDisplay = plutoType === 'Set' ? '' : `<p-k>${el[0]}</p-k>`;
+                        return `<p-r>${indexDisplay}<p-v>${mimepairOutput(el[1] as unknown[])}</p-v></p-r>`;
+                    }).join('');
+                    break;
+
+                case 'Dict':
+                    itemsHtml = elements.map(r => {
+                        if (r === 'more') {
+                            return '<pluto-tree-more>show more</pluto-tree-more>';
+                        }
+                        const el = r as unknown[];
+                        if (!Array.isArray(el) || el.length !== 2) return '';
+                        return `<p-r><p-k>${mimepairOutput(el[0] as unknown[])}</p-k><p-v>${mimepairOutput(el[1] as unknown[])}</p-v></p-r>`;
+                    }).join('');
+                    break;
+
+                case 'NamedTuple':
+                case 'struct':
+                    itemsHtml = elements.map(r => {
+                        if (r === 'more') {
+                            return '<pluto-tree-more>show more</pluto-tree-more>';
+                        }
+                        const el = r as unknown[];
+                        if (!Array.isArray(el) || el.length !== 2) return '';
+                        return `<p-r><p-k>${this.escapeHtml(String(el[0]))}</p-k><p-v>${mimepairOutput(el[1] as unknown[])}</p-v></p-r>`;
+                    }).join('');
+                    break;
+
+                default:
+                    // Default handling for unknown types
+                    itemsHtml = elements.map(r => {
+                        if (r === 'more') {
+                            return '<pluto-tree-more>show more</pluto-tree-more>';
+                        }
+                        const el = r as unknown[];
+                        if (!Array.isArray(el) || el.length !== 2) return '';
+                        return `<p-r><p-k>${el[0]}</p-k><p-v>${mimepairOutput(el[1] as unknown[])}</p-v></p-r>`;
+                    }).join('');
+            }
+
+            return `<pluto-tree class="${typeClass}${collapsedClass}">${prefixHtml}<pluto-tree-items class="${typeClass}">${itemsHtml}</pluto-tree-items></pluto-tree>`;
+        }
+
+        // Fallback
+        if (prefix) {
+            return `<span>${this.escapeHtml(prefix)}</span>`;
+        }
+        if (plutoType) {
+            return `<span>&lt;${this.escapeHtml(plutoType)}&gt;</span>`;
+        }
+
+        return `<span>${this.escapeHtml(JSON.stringify(obj).substring(0, 100))}</span>`;
+    }
+
+    /**
+     * Escape HTML special characters
+     */
+    private escapeHtml(str: string): string {
+        return str
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#039;');
     }
 
     /**
@@ -834,9 +1159,17 @@ export class PlutoNotebookController implements vscode.Disposable {
     private kernels = new Map<string, PlutoKernel>();
     private disposables: vscode.Disposable[] = [];
 
-    // Expose kernels for bond updates
-    getKernelForNotebook(notebook: vscode.NotebookDocument): PlutoKernel | undefined {
-        return this.kernels.get(notebook.uri.toString());
+    /**
+     * Set a bond value for a notebook (for interactive widgets like Slider)
+     */
+    async setBond(notebook: vscode.NotebookDocument, name: string, value: unknown): Promise<void> {
+        const key = notebook.uri.toString();
+        const kernel = this.kernels.get(key);
+        if (kernel && kernel.isRunning) {
+            await kernel.setBond(name, value);
+        } else {
+            console.log('[PlutoController] Cannot set bond, kernel not running');
+        }
     }
 
     constructor() {
