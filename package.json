@@ -68,6 +68,11 @@
         "title": "Wrap Cell in begin...end",
         "category": "Pluto",
         "icon": "$(code)"
+      },
+      {
+        "command": "pluto-notebook.saveAndExecute",
+        "title": "Save and Execute Modified Cells",
+        "category": "Pluto"
       }
     ],
     "menus": {
@@ -116,6 +121,12 @@
         "key": "ctrl+shift+b",
         "mac": "cmd+shift+b",
         "when": "notebookType == pluto-notebook && notebookCellFocused"
+      },
+      {
+        "command": "pluto-notebook.saveAndExecute",
+        "key": "ctrl+s",
+        "mac": "cmd+s",
+        "when": "notebookType == pluto-notebook"
       }
     ]
   },

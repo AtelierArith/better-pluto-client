@@ -105,6 +105,22 @@ export function activate(context: vscode.ExtensionContext) {
         })
     );
 
+    // Command to save and execute modified cells
+    context.subscriptions.push(
+        vscode.commands.registerCommand('pluto-notebook.saveAndExecute', async () => {
+            const notebook = getActiveNotebook();
+            if (notebook && controller) {
+                console.log('[PlutoExtension] saveAndExecute: Saving notebook...');
+                // Save the notebook document (this triggers serializer)
+                await notebook.save();
+                console.log('[PlutoExtension] saveAndExecute: Notebook saved, executing modified cells...');
+                // Then execute modified cells
+                await controller.executeModifiedCells(notebook);
+                console.log('[PlutoExtension] saveAndExecute: Done');
+            }
+        })
+    );
+
     // Command to wrap cell content in begin...end
     context.subscriptions.push(
         vscode.commands.registerCommand('pluto-notebook.wrapInBeginEnd', async () => {

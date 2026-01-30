@@ -81,6 +81,9 @@ function setupInteractiveElements(container: HTMLElement, context: RendererConte
 
     // Handle "show more" buttons in tree views
     setupShowMoreButtons(container, context);
+
+    // Handle tree collapse/expand
+    setupTreeCollapse(container);
 }
 
 /**
@@ -249,5 +252,43 @@ function setupShowMoreButtons(container: HTMLElement, context: RendererContext<v
                 moreBtn.style.opacity = '0.4';
             });
         }
+    });
+}
+
+/**
+ * Setup tree collapse/expand functionality
+ * Allows users to click on tree prefixes to toggle collapsed state
+ */
+function setupTreeCollapse(container: HTMLElement) {
+    const trees = container.querySelectorAll('pluto-tree');
+
+    trees.forEach((tree) => {
+        const treeEl = tree as HTMLElement;
+
+        // Add click handler to the tree element
+        treeEl.addEventListener('click', (e) => {
+            const target = e.target as HTMLElement;
+
+            // Only handle clicks on the tree itself or its prefix
+            const clickedTree = target.closest('pluto-tree') as HTMLElement | null;
+            const clickedPrefix = target.closest('pluto-tree-prefix');
+            const clickedMore = target.closest('pluto-tree-more');
+
+            // Don't toggle if clicking on "show more" button
+            if (clickedMore) return;
+
+            // Only toggle if clicking directly on the tree or prefix
+            if (clickedTree && (clickedPrefix || target === clickedTree || target.tagName.toLowerCase() === 'pluto-tree')) {
+                // Check if parent tree is collapsed - if so, don't toggle children
+                const parentTree = clickedTree.parentElement?.closest('pluto-tree') as HTMLElement | null;
+                if (parentTree && parentTree.classList.contains('collapsed')) {
+                    return;
+                }
+
+                // Toggle collapsed state
+                clickedTree.classList.toggle('collapsed');
+                e.stopPropagation();
+            }
+        });
     });
 }
