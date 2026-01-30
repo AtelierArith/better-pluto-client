@@ -10,6 +10,17 @@ import { generateCellId } from './PlutoNotebookParser';
 const NOTEBOOK_TYPE = 'pluto-notebook';
 
 /**
+ * Check if a string is a Pluto objectid (12-20 character hex string)
+ * Pluto uses objectids as placeholders for lazy-loaded data
+ */
+function isPlutoObjectId(str: string | undefined | null): boolean {
+    if (!str) return false;
+    const trimmed = str.trim();
+    // Objectids are typically 14-16 hex chars, but allow wider range for safety
+    return /^[0-9a-f]{12,20}$/i.test(trimmed);
+}
+
+/**
  * Manages Pluto kernel for a notebook
  */
 class PlutoKernel {
@@ -135,6 +146,30 @@ class PlutoKernel {
     }
 
     /**
+     * Get a published object (for "show more" in tree views)
+     */
+    async getPublishedObject(objectid: string): Promise<unknown> {
+        if (!this._isRunning) {
+            console.log('[PlutoKernel] Cannot get published object, kernel not running');
+            return null;
+        }
+        console.log(`[PlutoKernel] Getting published object: ${objectid}`);
+        return await this.server.getPublishedObject(objectid);
+    }
+
+    /**
+     * Update cell order (for drag-and-drop reordering)
+     */
+    async updateCellOrder(newOrder: string[]): Promise<void> {
+        if (!this._isRunning) {
+            console.log('[PlutoKernel] Cannot update cell order, kernel not running');
+            return;
+        }
+        console.log(`[PlutoKernel] Updating cell order: ${newOrder.length} cells`);
+        await this.server.updateCellOrder(newOrder);
+    }
+
+    /**
      * Execute cells
      */
     async executeCells(cells: vscode.NotebookCell[]): Promise<void> {
@@ -208,10 +243,12 @@ class PlutoKernel {
     }
 
     /**
-     * Handle notebook changes (cell added/removed)
+     * Handle notebook changes (cell added/removed/reordered)
      */
     async handleNotebookChange(e: vscode.NotebookDocumentChangeEvent): Promise<void> {
         if (!this._isRunning) return;
+
+        let hasStructuralChange = false;
 
         // Handle removed cells
         for (const change of e.contentChanges) {
@@ -223,6 +260,7 @@ class PlutoKernel {
                     await this.server.deleteCell(cellId, index);
                     this.knownCellIds.delete(cellId);
                     this.cellOutputs.delete(cellId);
+                    hasStructuralChange = true;
                 }
             }
 
@@ -240,6 +278,45 @@ class PlutoKernel {
                 console.log(`[PlutoKernel] Adding cell ${cellId} at index ${index}`);
                 await this.server.addCell(cellId, index, cell.document.getText());
                 this.knownCellIds.add(cellId);
+                hasStructuralChange = true;
+            }
+        }
+
+        // Detect cell reordering: compare current order with server's order
+        // This handles drag-and-drop reordering which doesn't show as add/remove
+        if (!hasStructuralChange && e.contentChanges.length > 0) {
+            await this.syncCellOrderIfChanged();
+        }
+    }
+
+    /**
+     * Sync cell order with Pluto if it has changed
+     * This handles drag-and-drop reordering
+     */
+    private async syncCellOrderIfChanged(): Promise<void> {
+        // Get current cell order from notebook
+        const currentOrder: string[] = [];
+        for (let i = 0; i < this.notebook.cellCount; i++) {
+            const cell = this.notebook.cellAt(i);
+            const cellId = getCellId(cell);
+            if (cellId) {
+                currentOrder.push(cellId);
+            }
+        }
+
+        // Get server's cell order
+        const serverOrder = this.server.getCellOrder();
+
+        // Check if order has changed (same cells, different order)
+        if (currentOrder.length === serverOrder.length) {
+            const sameContent = currentOrder.every(id => serverOrder.includes(id));
+            const sameOrder = currentOrder.every((id, idx) => serverOrder[idx] === id);
+
+            if (sameContent && !sameOrder) {
+                console.log('[PlutoKernel] Cell order changed, syncing with Pluto');
+                console.log('[PlutoKernel] Old order:', serverOrder);
+                console.log('[PlutoKernel] New order:', currentOrder);
+                await this.server.updateCellOrder(currentOrder);
             }
         }
     }
@@ -296,7 +373,7 @@ class PlutoKernel {
         if (state.output) {
             // For tree+object, don't overwrite existing data with just an objectid
             const isObjectIdOnly = state.output.mime === 'application/vnd.pluto.tree+object' &&
-                                   /^[0-9a-f]{16}$/i.test(state.output.body);
+                                   isPlutoObjectId(state.output.body);
             if (isObjectIdOnly && existingOutput.body && existingOutput.mime === 'application/vnd.pluto.tree+object') {
                 console.log(`[PlutoKernel] Cell ${cellId} skipping objectid-only update, keeping existing tree data`);
             } else {
@@ -359,10 +436,16 @@ class PlutoKernel {
                 ]));
             } else if (mime === 'application/vnd.pluto.tree+object') {
                 // Pluto's tree object format - render as collapsible HTML
-                const treeHtml = this.renderPlutoTreeAsHtml(existingOutput.body);
-                outputs.push(new vscode.NotebookCellOutput([
-                    vscode.NotebookCellOutputItem.text(treeHtml, 'text/html')
-                ]));
+                // Skip if body is just an objectid placeholder (14-16 hex chars)
+                const isObjectIdOnly = isPlutoObjectId(existingOutput.body);
+                if (!isObjectIdOnly) {
+                    const treeHtml = this.renderPlutoTreeAsHtml(existingOutput.body);
+                    // Use custom renderer to enable "show more" messaging
+                    outputs.push(new vscode.NotebookCellOutput([
+                        vscode.NotebookCellOutputItem.text(treeHtml, 'application/vnd.pluto.html+html')
+                    ]));
+                }
+                // If objectid only, don't add output - wait for real data
             } else if (mime === 'text/html') {
                 // Render HTML - use custom MIME type for Pluto HTML with bonds
                 // This triggers our custom renderer which handles interactive elements
@@ -508,10 +591,16 @@ class PlutoKernel {
                 ]));
             } else if (mime === 'application/vnd.pluto.tree+object') {
                 // Pluto's tree object format - render as collapsible HTML
-                const treeHtml = this.renderPlutoTreeAsHtml(existingOutput.body);
-                outputs.push(new vscode.NotebookCellOutput([
-                    vscode.NotebookCellOutputItem.text(treeHtml, 'text/html')
-                ]));
+                // Skip if body is just an objectid placeholder (16 hex chars)
+                const isObjectIdOnly = isPlutoObjectId(existingOutput.body);
+                if (!isObjectIdOnly) {
+                    const treeHtml = this.renderPlutoTreeAsHtml(existingOutput.body);
+                    // Use custom renderer to enable "show more" messaging
+                    outputs.push(new vscode.NotebookCellOutput([
+                        vscode.NotebookCellOutputItem.text(treeHtml, 'application/vnd.pluto.html+html')
+                    ]));
+                }
+                // If objectid only, don't add output - wait for real data
             } else if (mime === 'text/html') {
                 // Render HTML - use custom MIME type for Pluto HTML with bonds
                 // This triggers our custom renderer which handles interactive elements
@@ -622,7 +711,7 @@ class PlutoKernel {
      */
     private parsePlutoTreeObject(body: string): string {
         // Check if body is just an objectid (hex string) - Pluto sometimes sends this
-        if (/^[0-9a-f]{16}$/i.test(body)) {
+        if (isPlutoObjectId(body)) {
             console.log('[PlutoKernel] Tree object is just objectid, returning placeholder');
             return '(computing...)';
         }
@@ -646,7 +735,7 @@ class PlutoKernel {
      */
     private renderPlutoTreeAsHtml(body: string): string {
         // Check if body is just an objectid (hex string)
-        if (/^[0-9a-f]{16}$/i.test(body)) {
+        if (isPlutoObjectId(body)) {
             return '<span style="color: #888; font-style: italic;">(computing...)</span>';
         }
 
@@ -796,6 +885,13 @@ pluto-tree.collapsed pluto-tree-more::before {
 </style>
 <script>
 document.addEventListener('click', function(e) {
+    // Handle tree collapse/expand (skip if clicking "show more" - handled by renderer)
+    const moreButton = e.target.closest('pluto-tree-more');
+    if (moreButton) {
+        // Let the renderer handle this via postMessage
+        return;
+    }
+
     const tree = e.target.closest('pluto-tree');
     const prefix = e.target.closest('pluto-tree-prefix');
     if (tree && (prefix || e.target === tree)) {
@@ -828,6 +924,55 @@ ${treeHtml}`;
 
         if (typeof obj !== 'object') {
             return `<span>${this.escapeHtml(String(obj))}</span>`;
+        }
+
+        // Handle arrays directly (sometimes Pluto sends just the elements array)
+        if (Array.isArray(obj)) {
+            // Check if this looks like a tree elements array [[index, [value, mime]], ...]
+            if (obj.length > 0 && Array.isArray(obj[0]) && obj[0].length === 2) {
+                // Treat as Array type
+                const collapsedClass = isRoot ? '' : ' collapsed';
+                const renderMimepair = (pair: unknown): string => {
+                    if (!Array.isArray(pair) || pair.length !== 2) {
+                        return this.renderPlutoTree(pair, false);
+                    }
+                    const [body, mime] = pair;
+                    if (mime === 'application/vnd.pluto.tree+object' && body && typeof body === 'object') {
+                        return this.renderPlutoTree(body, false);
+                    }
+                    if (typeof body === 'string') {
+                        return `<span>${this.escapeHtml(body)}</span>`;
+                    }
+                    return this.renderPlutoTree(body, false);
+                };
+                const renderMoreDirect = (r: unknown): string => {
+                    if (r === 'more') {
+                        return '<pluto-tree-more>show more</pluto-tree-more>';
+                    }
+                    if (r && typeof r === 'object' && !Array.isArray(r)) {
+                        const moreObj = r as Record<string, unknown>;
+                        if (moreObj.head === 'more' && moreObj.objectid) {
+                            const oid = this.escapeHtml(String(moreObj.objectid));
+                            return `<pluto-tree-more data-objectid="${oid}">show more</pluto-tree-more>`;
+                        }
+                    }
+                    return '';
+                };
+                const itemsHtml = obj.map((el) => {
+                    const moreHtml = renderMoreDirect(el);
+                    if (moreHtml) return moreHtml;
+                    if (!Array.isArray(el) || el.length !== 2) return '';
+                    const indexDisplay = `<p-k>${el[0]}</p-k>`;
+                    return `<p-r>${indexDisplay}<p-v>${renderMimepair(el[1])}</p-v></p-r>`;
+                }).join('');
+                const isMoreMarker = (e: unknown) => e === 'more' || (e && typeof e === 'object' && !Array.isArray(e) && (e as Record<string, unknown>).head === 'more');
+                const count = obj.filter(e => !isMoreMarker(e)).length;
+                const prefix = `${count}-element Array:`;
+                const prefixHtml = `<pluto-tree-prefix><span class="long">${this.escapeHtml(prefix)}</span><span class="short">${this.escapeHtml(prefix)}</span></pluto-tree-prefix>`;
+                return `<pluto-tree class="Array${collapsedClass}">${prefixHtml}<pluto-tree-items class="Array">${itemsHtml}</pluto-tree-items></pluto-tree>`;
+            }
+            // Otherwise, just stringify
+            return `<span>${this.escapeHtml(JSON.stringify(obj).substring(0, 100))}</span>`;
         }
 
         const record = obj as Record<string, unknown>;
@@ -874,14 +1019,28 @@ ${treeHtml}`;
 
             let itemsHtml = '';
 
+            // Helper to render "more" marker with objectid
+            const renderMore = (r: unknown): string => {
+                if (r === 'more') {
+                    return '<pluto-tree-more>show more</pluto-tree-more>';
+                }
+                if (r && typeof r === 'object' && !Array.isArray(r)) {
+                    const obj = r as Record<string, unknown>;
+                    if (obj.head === 'more' && obj.objectid) {
+                        const oid = this.escapeHtml(String(obj.objectid));
+                        return `<pluto-tree-more data-objectid="${oid}">show more</pluto-tree-more>`;
+                    }
+                }
+                return '';
+            };
+
             switch (plutoType) {
                 case 'Array':
                 case 'Set':
                 case 'Tuple':
                     itemsHtml = elements.map(r => {
-                        if (r === 'more') {
-                            return '<pluto-tree-more>show more</pluto-tree-more>';
-                        }
+                        const moreHtml = renderMore(r);
+                        if (moreHtml) return moreHtml;
                         const el = r as unknown[];
                         if (!Array.isArray(el) || el.length !== 2) return '';
                         const indexDisplay = plutoType === 'Set' ? '' : `<p-k>${el[0]}</p-k>`;
@@ -891,9 +1050,8 @@ ${treeHtml}`;
 
                 case 'Dict':
                     itemsHtml = elements.map(r => {
-                        if (r === 'more') {
-                            return '<pluto-tree-more>show more</pluto-tree-more>';
-                        }
+                        const moreHtml = renderMore(r);
+                        if (moreHtml) return moreHtml;
                         const el = r as unknown[];
                         if (!Array.isArray(el) || el.length !== 2) return '';
                         return `<p-r><p-k>${mimepairOutput(el[0] as unknown[])}</p-k><p-v>${mimepairOutput(el[1] as unknown[])}</p-v></p-r>`;
@@ -903,9 +1061,8 @@ ${treeHtml}`;
                 case 'NamedTuple':
                 case 'struct':
                     itemsHtml = elements.map(r => {
-                        if (r === 'more') {
-                            return '<pluto-tree-more>show more</pluto-tree-more>';
-                        }
+                        const moreHtml = renderMore(r);
+                        if (moreHtml) return moreHtml;
                         const el = r as unknown[];
                         if (!Array.isArray(el) || el.length !== 2) return '';
                         return `<p-r><p-k>${this.escapeHtml(String(el[0]))}</p-k><p-v>${mimepairOutput(el[1] as unknown[])}</p-v></p-r>`;
@@ -915,9 +1072,8 @@ ${treeHtml}`;
                 default:
                     // Default handling for unknown types
                     itemsHtml = elements.map(r => {
-                        if (r === 'more') {
-                            return '<pluto-tree-more>show more</pluto-tree-more>';
-                        }
+                        const moreHtml = renderMore(r);
+                        if (moreHtml) return moreHtml;
                         const el = r as unknown[];
                         if (!Array.isArray(el) || el.length !== 2) return '';
                         return `<p-r><p-k>${el[0]}</p-k><p-v>${mimepairOutput(el[1] as unknown[])}</p-v></p-r>`;
@@ -1169,6 +1325,25 @@ export class PlutoNotebookController implements vscode.Disposable {
             await kernel.setBond(name, value);
         } else {
             console.log('[PlutoController] Cannot set bond, kernel not running');
+        }
+    }
+
+    /**
+     * Get a published object from Pluto (for "show more" in tree views)
+     */
+    async getPublishedObject(notebook: vscode.NotebookDocument, objectid: string): Promise<void> {
+        const key = notebook.uri.toString();
+        const kernel = this.kernels.get(key);
+        if (kernel && kernel.isRunning) {
+            try {
+                const result = await kernel.getPublishedObject(objectid);
+                console.log('[PlutoController] Got published object:', JSON.stringify(result).substring(0, 200));
+                // TODO: Update the cell output with the expanded data
+            } catch (error) {
+                console.error('[PlutoController] Failed to get published object:', error);
+            }
+        } else {
+            console.log('[PlutoController] Cannot get published object, kernel not running');
         }
     }
 

@@ -15,38 +15,27 @@ Pluto.jl リアクティブノートブックの機能を、ブラウザでは�
 ```
 ┌─────────────────────────────────────────────────────────┐
 │ VS Code Extension                                        │
-│  ┌─────────────────┐    ┌─────────────────────────────┐ │
-│  │ PlutoWebview    │    │ JuliaExecutor               │ │
-│  │ Provider        │───▶│ (独自実装)                   │ │
-│  │                 │    │                             │ │
-│  │ - UI表示        │    │ - spawn('julia', ['-e',...])│ │
-│  │ - セル編集      │    │ - 各セル独立実行             │ │
-│  └─────────────────┘    └─────────────────────────────┘ │
+│  ┌─────────────────────┐  ┌───────────────────────────┐ │
+│  │ PlutoNotebook       │  │ PlutoServer               │ │
+│  │ Controller          │─▶│ (WebSocket)               │ │
+│  │                     │  │                           │ │
+│  │ - セル実行管理      │  │ - Pluto.jl プロセス管理   │ │
+│  │ - 出力レンダリング  │  │ - WebSocket通信           │ │
+│  │ - 状態管理          │  │ - MessagePack encode/decode│ │
+│  └─────────────────────┘  └───────────────────────────┘ │
+│            │                          │                  │
+│            ▼                          │                  │
+│  ┌─────────────────────┐              │                  │
+│  │ pluto-renderer      │              │                  │
+│  │ (Custom Renderer)   │              │                  │
+│  │                     │              │                  │
+│  │ - HTML出力表示      │              │                  │
+│  │ - インタラクティブ  │              │                  │
+│  │   ウィジェット対応  │◀─────────────┘                  │
+│  └─────────────────────┘    (bond updates)              │
 └─────────────────────────────────────────────────────────┘
-```
-
-### 現在の問題点
-
-1. **プリアンブルが実行されない**: ノートブックの `using Markdown`, `using InteractiveUtils` は表示されるだけで、セル実行時に含まれない
-2. **セル間の状態が共有されない**: 各セルが独立した Julia プロセスで実行される
-3. **リアクティビティがない**: Pluto.jl の依存関係解析・自動再実行が機能しない
-4. **Pluto.jl の機能を活用していない**: 独自の簡易実装のため、Pluto.jl の豊富な機能が使えない
-
-## 目指すアーキテクチャ
-
-```
-┌─────────────────────────────────────────────────────────┐
-│ VS Code Extension                                        │
-│  ┌─────────────────┐    ┌─────────────────────────────┐ │
-│  │ PlutoWebview    │    │ PlutoConnection             │ │
-│  │ Provider        │───▶│ (WebSocket/HTTP)            │ │
-│  │                 │    │                             │ │
-│  │ - UI表示        │    │ - Pluto.jl API呼び出し      │ │
-│  │ - セル編集      │    │ - 状態同期                   │ │
-│  └─────────────────┘    └─────────────────────────────┘ │
-└─────────────────────────────────────────────────────────┘
-                              │
-                              ▼ WebSocket
+                             │
+                             ▼ WebSocket (MessagePack)
 ┌─────────────────────────────────────────────────────────┐
 │ Pluto.jl Server (Julia)                                  │
 │  - セル実行                                              │
@@ -78,19 +67,23 @@ Pluto.jl は WebSocket で以下のメッセージを送受信:
 
 ## 実装タスク
 
-### Phase 1: Pluto.jl サーバー接続
-- [x] Pluto.jl サーバーの起動/管理 (`PlutoConnection.ts`)
+### Phase 1: Pluto.jl サーバー接続 ✅
+- [x] Pluto.jl サーバーの起動/管理 (`PlutoServer.ts`)
 - [x] WebSocket クライアント実装 (MessagePack + ws)
 - [x] メッセージプロトコル理解・実装
-- [x] PlutoWebviewProvider との統合（実行モード切り替え対応）
+- [x] VS Code Notebook API との統合
 - [ ] エラーハンドリング改善
 - [ ] 接続状態の UI 表示
 
-### Phase 2: UI 連携
-- [ ] セル実行結果の表示（Pluto形式）
-- [ ] エラー表示（Pluto.jl フォーマット）
-- [ ] リアクティブ更新の反映
-- [ ] 実行中状態の表示
+### Phase 2: UI 連携 🚧
+- [x] セル実行結果の表示（Pluto形式）
+- [x] エラー表示（Pluto.jl フォーマット）
+- [x] リアクティブ更新の反映
+- [x] 実行中状態の表示
+- [x] インタラクティブウィジェット対応（PlutoUI: Slider, Select, Checkbox 等）
+- [x] Pluto.jl 同一のツリー出力表示（折りたたみ可能）
+- [x] 画像出力（PNG, SVG）
+- [ ] プロットライブラリ対応（Plots.jl 等）
 
 ### Phase 3: 完全な機能
 - [ ] パッケージ管理 UI
@@ -271,32 +264,45 @@ VSIX を作らずに素早くテストする場合：
 
 ### 現在の実行モード
 
-現在は **standalone モード**（JuliaExecutor）で動作中。
+**Pluto.jl サーバー接続モードで動作中。**
 
-`PlutoConnection.ts` は実装済みだが、`ws` モジュールのバンドリング問題により一時的に無効化されている。
+`.jl` ファイルを開くと VS Code の Notebook UI で表示され、セル実行時に Pluto.jl サーバーが自動起動します。
 
-```typescript
-// PlutoWebviewProvider.ts - 現在コメントアウト中
-// import { PlutoConnection, CellResult } from './PlutoConnection';
-```
+#### 対応している機能
 
-### PlutoConnection を有効にする場合
-
-1. `PlutoWebviewProvider.ts` のインポートを有効化
-2. `executionMode` を `'pluto'` に変更
-3. webpack で `ws` モジュールが正しくバンドルされるよう設定を調整
+- **リアクティブ実行**: セル間の依存関係を自動解析し、変更時に関連セルを再実行
+- **インタラクティブウィジェット**: `@bind` マクロで PlutoUI の Slider, Select, Checkbox 等を使用可能
+- **ツリー出力**: 配列やオブジェクトを Pluto.jl と同一の折りたたみ可能な形式で表示
+- **画像出力**: PNG, JPEG, SVG をサポート
+- **エラー表示**: Pluto.jl のスタックトレースを表示
 
 ## ファイル構成
 
 ```
 src/
-├── extension.ts             # エントリーポイント
-├── PlutoWebviewProvider.ts  # Webview UI プロバイダー
-├── PlutoEditorProvider.ts   # カスタムエディタプロバイダー
-├── PlutoNotebookParser.ts   # .jl ファイルパーサー
-├── PlutoConnection.ts       # Pluto.jl サーバー接続 (NEW)
-├── JuliaExecutor.ts         # Julia 実行（旧・独自実装）
-└── CellDependencyAnalyzer.ts # 依存関係解析
+├── extension.ts               # エントリーポイント、レンダラーメッセージング
+├── PlutoNotebookController.ts # ノートブックコントローラー（セル実行、出力レンダリング）
+├── PlutoNotebookSerializer.ts # ノートブックシリアライザー（ファイル読み書き）
+├── PlutoNotebookParser.ts     # .jl ファイルパーサー（Pluto形式解析）
+├── PlutoServer.ts             # Pluto.jl サーバー管理、WebSocket通信
+└── pluto-renderer.ts          # カスタムレンダラー（インタラクティブHTML対応）
 
-Pluto.jl/                    # Pluto.jl ソースコード（参照用）
+tsconfig.json                  # メイン TypeScript 設定
+tsconfig.renderer.json         # レンダラー用 TypeScript 設定（DOM types）
+webpack.config.js              # Webpack 設定（extension + renderer）
+
+samples/
+└── Basic.jl                   # サンプルノートブック
+
+pluto-webview/
+└── pluto-loader.html          # Webview ローダー（未使用）
 ```
+
+### 主要コンポーネント
+
+| ファイル | 役割 |
+|---------|------|
+| `PlutoNotebookController.ts` | VS Code Notebook API との統合、セル実行管理、出力変換 |
+| `PlutoServer.ts` | Pluto.jl プロセスの起動・管理、WebSocket通信、MessagePack encode/decode |
+| `pluto-renderer.ts` | HTML出力のレンダリング、`@bind` ウィジェットのイベントキャプチャ |
+| `extension.ts` | 拡張機能の初期化、レンダラーメッセージングのセットアップ |
