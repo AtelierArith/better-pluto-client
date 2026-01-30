@@ -101,6 +101,57 @@ export function activate(context: vscode.ExtensionContext) {
             }
         })
     );
+
+    // Command to wrap cell content in begin...end
+    context.subscriptions.push(
+        vscode.commands.registerCommand('pluto-notebook.wrapInBeginEnd', async () => {
+            const notebookEditor = vscode.window.activeNotebookEditor;
+            if (!notebookEditor) {
+                vscode.window.showErrorMessage('No active notebook');
+                return;
+            }
+
+            const selections = notebookEditor.selections;
+            if (selections.length === 0) {
+                vscode.window.showErrorMessage('No cell selected');
+                return;
+            }
+
+            // Get the first selected cell
+            const cellRange = selections[0];
+            const cell = notebookEditor.notebook.cellAt(cellRange.start);
+
+            if (cell.kind !== vscode.NotebookCellKind.Code) {
+                vscode.window.showErrorMessage('Selected cell is not a code cell');
+                return;
+            }
+
+            const originalCode = cell.document.getText();
+
+            // Check if already wrapped in begin...end
+            const trimmed = originalCode.trim();
+            if (trimmed.startsWith('begin') && trimmed.endsWith('end')) {
+                vscode.window.showInformationMessage('Cell is already wrapped in begin...end');
+                return;
+            }
+
+            // Wrap in begin...end with proper indentation
+            const lines = originalCode.split('\n');
+            const indentedLines = lines.map(line => line ? '    ' + line : line);
+            const wrappedCode = 'begin\n' + indentedLines.join('\n') + '\nend';
+
+            // Replace cell content
+            const edit = new vscode.WorkspaceEdit();
+            const fullRange = new vscode.Range(
+                cell.document.positionAt(0),
+                cell.document.positionAt(cell.document.getText().length)
+            );
+            edit.replace(cell.document.uri, fullRange, wrappedCode);
+            await vscode.workspace.applyEdit(edit);
+
+            vscode.window.showInformationMessage('Cell wrapped in begin...end');
+        })
+    );
 }
 
 /**

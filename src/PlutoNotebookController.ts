@@ -16,7 +16,6 @@ class PlutoKernel {
     private server: PlutoServer;
     private _isRunning = false;
     private cellExecutions = new Map<string, vscode.NotebookCellExecution>();
-    private cellTimeouts = new Map<string, NodeJS.Timeout>();  // Execution timeouts by cell ID
     private cellOutputs = new Map<string, { body?: string; mime?: string; logs?: LogEntry[] }>();
     private pendingDirectUpdates = new Map<string, NodeJS.Timeout>();  // Debounced direct updates
     private knownCellIds = new Set<string>();  // Cell IDs that Pluto knows about
@@ -74,12 +73,6 @@ class PlutoKernel {
         }
         this.pendingDirectUpdates.clear();
 
-        // Clear all execution timeouts
-        for (const timeoutId of this.cellTimeouts.values()) {
-            clearTimeout(timeoutId);
-        }
-        this.cellTimeouts.clear();
-
         // End all running executions
         for (const [cellId, execution] of this.cellExecutions) {
             try {
@@ -114,12 +107,6 @@ class PlutoKernel {
             await this.server.interruptAll();
         }
 
-        // Clear all execution timeouts
-        for (const timeoutId of this.cellTimeouts.values()) {
-            clearTimeout(timeoutId);
-        }
-        this.cellTimeouts.clear();
-
         // End all running executions
         for (const [cellId, execution] of this.cellExecutions) {
             console.log(`[PlutoKernel] Ending execution for ${cellId} due to interrupt`);
@@ -133,6 +120,18 @@ class PlutoKernel {
             } catch {}
         }
         this.cellExecutions.clear();
+    }
+
+    /**
+     * Set a bond value (for interactive widgets like Slider)
+     */
+    async setBond(name: string, value: unknown): Promise<void> {
+        if (!this._isRunning) {
+            console.log('[PlutoKernel] Cannot set bond, kernel not running');
+            return;
+        }
+        console.log(`[PlutoKernel] Setting bond ${name} to`, value);
+        await this.server.setBond(name, value);
     }
 
     /**
@@ -174,12 +173,6 @@ class PlutoKernel {
         const existingExecution = this.cellExecutions.get(cellId);
         if (existingExecution) {
             console.log(`[PlutoKernel] Ending previous execution for ${cellId}`);
-            // Clear existing timeout
-            const existingTimeout = this.cellTimeouts.get(cellId);
-            if (existingTimeout) {
-                clearTimeout(existingTimeout);
-                this.cellTimeouts.delete(cellId);
-            }
             try {
                 existingExecution.end(false, Date.now());
             } catch {}
@@ -193,34 +186,10 @@ class PlutoKernel {
         execution.start(Date.now());
         execution.clearOutput();
 
-        // Set up a timeout to prevent hanging executions (30 seconds)
-        const timeoutId = setTimeout(() => {
-            const exec = this.cellExecutions.get(cellId);
-            if (exec) {
-                console.log(`[PlutoKernel] Execution timeout for ${cellId}`);
-                exec.replaceOutput([
-                    new vscode.NotebookCellOutput([
-                        vscode.NotebookCellOutputItem.stderr('Execution timed out. Check Pluto server status.')
-                    ])
-                ]);
-                exec.end(false, Date.now());
-                this.cellExecutions.delete(cellId);
-                this.cellTimeouts.delete(cellId);
-            }
-        }, 30000);
-
-        // Store timeout to clear it later
-        this.cellTimeouts.set(cellId, timeoutId);
+        // Note: Timeout disabled - Pluto executions can take a long time for compilation
 
         // Update cell code in Pluto and run
         try {
-            // Check if Pluto knows about this cell
-            if (!this.knownCellIds.has(cellId)) {
-                console.log(`[PlutoKernel] Cell ${cellId} is new to Pluto, adding at index ${cell.index}`);
-                await this.server.addCell(cellId, cell.index, code);
-                this.knownCellIds.add(cellId);
-            }
-
             console.log(`[PlutoKernel] Sending updateCell for ${cellId}`);
             await this.server.updateCell(cellId, code);
             console.log(`[PlutoKernel] Sending runCell for ${cellId}`);
@@ -228,8 +197,6 @@ class PlutoKernel {
             console.log(`[PlutoKernel] runCell completed for ${cellId}`);
         } catch (err) {
             console.error('[PlutoKernel] Failed to run cell:', err);
-            clearTimeout(timeoutId);
-            this.cellTimeouts.delete(cellId);
             execution.replaceOutput([
                 new vscode.NotebookCellOutput([
                     vscode.NotebookCellOutputItem.error(err as Error)
@@ -360,16 +327,47 @@ class PlutoKernel {
         if (existingOutput.body) {
             const mime = existingOutput.mime || 'text/plain';
 
-            if (state.errored) {
+            if (state.errored || mime === 'application/vnd.pluto.stacktrace+object') {
+                // Handle Pluto error stacktrace
+                const errorText = this.parseErrorOutput(existingOutput.body, mime);
                 outputs.push(new vscode.NotebookCellOutput([
-                    vscode.NotebookCellOutputItem.error(new Error(existingOutput.body))
+                    vscode.NotebookCellOutputItem.stderr(errorText)
+                ]));
+                // Show wrap suggestion for "extra token" errors
+                if (existingOutput.body.includes('extra token after end of expression')) {
+                    this.showWrapSuggestion(cellId);
+                }
+            } else if (existingOutput.body.includes('extra token after end of expression')) {
+                // Handle "multiple expressions" syntax error
+                const errorText = this.addErrorHints(existingOutput.body);
+                outputs.push(new vscode.NotebookCellOutput([
+                    vscode.NotebookCellOutputItem.stderr(errorText)
+                ]));
+                // Show notification with wrap button
+                this.showWrapSuggestion(cellId);
+            } else if (existingOutput.body.includes('syntax:')) {
+                // Handle other syntax errors
+                outputs.push(new vscode.NotebookCellOutput([
+                    vscode.NotebookCellOutputItem.stderr(existingOutput.body)
+                ]));
+            } else if (mime === 'application/vnd.pluto.tree+object') {
+                // Pluto's tree object format - convert to readable text
+                const displayText = this.parsePlutoTreeObject(existingOutput.body);
+                outputs.push(new vscode.NotebookCellOutput([
+                    vscode.NotebookCellOutputItem.text(displayText, 'text/plain')
                 ]));
             } else if (mime === 'text/html') {
+                // Render HTML
                 outputs.push(new vscode.NotebookCellOutput([
                     vscode.NotebookCellOutputItem.text(existingOutput.body, 'text/html')
                 ]));
-            } else if (mime.startsWith('image/')) {
-                // Handle image output - body is base64 encoded
+            } else if (mime === 'image/svg+xml') {
+                // SVG is text-based, render as SVG (like julia-vscode)
+                outputs.push(new vscode.NotebookCellOutput([
+                    vscode.NotebookCellOutputItem.text(existingOutput.body, 'image/svg+xml')
+                ]));
+            } else if (mime === 'image/png' || mime === 'image/jpeg') {
+                // Binary images: decode base64 to Buffer (like julia-vscode)
                 try {
                     const buffer = Buffer.from(existingOutput.body, 'base64');
                     outputs.push(new vscode.NotebookCellOutput([
@@ -378,6 +376,18 @@ class PlutoKernel {
                 } catch {
                     outputs.push(new vscode.NotebookCellOutput([
                         vscode.NotebookCellOutputItem.text(existingOutput.body, 'text/plain')
+                    ]));
+                }
+            } else if (mime.endsWith('+json')) {
+                // JSON-based formats (Vega, Plotly, etc.)
+                try {
+                    const jsonData = JSON.parse(existingOutput.body);
+                    outputs.push(new vscode.NotebookCellOutput([
+                        vscode.NotebookCellOutputItem.json(jsonData, mime)
+                    ]));
+                } catch {
+                    outputs.push(new vscode.NotebookCellOutput([
+                        vscode.NotebookCellOutputItem.text(existingOutput.body, mime)
                     ]));
                 }
             } else {
@@ -401,12 +411,6 @@ class PlutoKernel {
 
             if (shouldEnd) {
                 console.log(`[PlutoKernel] Ending execution for ${cellId} (running=${state.running}, runtime=${state.runtime})`);
-                // Clear timeout
-                const timeoutId = this.cellTimeouts.get(cellId);
-                if (timeoutId) {
-                    clearTimeout(timeoutId);
-                    this.cellTimeouts.delete(cellId);
-                }
                 const success = !state.errored;
                 execution.end(success, Date.now());
                 this.cellExecutions.delete(cellId);
@@ -468,11 +472,47 @@ class PlutoKernel {
         if (existingOutput.body) {
             const mime = existingOutput.mime || 'text/plain';
 
-            if (mime === 'text/html') {
+            if (mime === 'application/vnd.pluto.stacktrace+object') {
+                // Handle Pluto error stacktrace
+                const errorText = this.parseErrorOutput(existingOutput.body, mime);
+                outputs.push(new vscode.NotebookCellOutput([
+                    vscode.NotebookCellOutputItem.stderr(errorText)
+                ]));
+                // Show wrap suggestion for "extra token" errors
+                if (existingOutput.body.includes('extra token after end of expression')) {
+                    this.showWrapSuggestion(cellId);
+                }
+            } else if (existingOutput.body.includes('extra token after end of expression')) {
+                // Handle "multiple expressions" syntax error
+                const errorText = this.addErrorHints(existingOutput.body);
+                outputs.push(new vscode.NotebookCellOutput([
+                    vscode.NotebookCellOutputItem.stderr(errorText)
+                ]));
+                // Show notification with wrap button
+                this.showWrapSuggestion(cellId);
+            } else if (existingOutput.body.includes('syntax:')) {
+                // Handle other syntax errors
+                outputs.push(new vscode.NotebookCellOutput([
+                    vscode.NotebookCellOutputItem.stderr(existingOutput.body)
+                ]));
+            } else if (mime === 'application/vnd.pluto.tree+object') {
+                // Pluto's tree object format - convert to readable text
+                const displayText = this.parsePlutoTreeObject(existingOutput.body);
+                outputs.push(new vscode.NotebookCellOutput([
+                    vscode.NotebookCellOutputItem.text(displayText, 'text/plain')
+                ]));
+            } else if (mime === 'text/html') {
+                // Render HTML
                 outputs.push(new vscode.NotebookCellOutput([
                     vscode.NotebookCellOutputItem.text(existingOutput.body, 'text/html')
                 ]));
-            } else if (mime.startsWith('image/')) {
+            } else if (mime === 'image/svg+xml') {
+                // SVG is text-based, render as SVG
+                outputs.push(new vscode.NotebookCellOutput([
+                    vscode.NotebookCellOutputItem.text(existingOutput.body, 'image/svg+xml')
+                ]));
+            } else if (mime === 'image/png' || mime === 'image/jpeg') {
+                // Binary images: decode base64 to Buffer
                 try {
                     const buffer = Buffer.from(existingOutput.body, 'base64');
                     outputs.push(new vscode.NotebookCellOutput([
@@ -481,6 +521,18 @@ class PlutoKernel {
                 } catch {
                     outputs.push(new vscode.NotebookCellOutput([
                         vscode.NotebookCellOutputItem.text(existingOutput.body, 'text/plain')
+                    ]));
+                }
+            } else if (mime.endsWith('+json')) {
+                // JSON-based formats (Vega, Plotly, etc.)
+                try {
+                    const jsonData = JSON.parse(existingOutput.body);
+                    outputs.push(new vscode.NotebookCellOutput([
+                        vscode.NotebookCellOutputItem.json(jsonData, mime)
+                    ]));
+                } catch {
+                    outputs.push(new vscode.NotebookCellOutput([
+                        vscode.NotebookCellOutputItem.text(existingOutput.body, mime)
                     ]));
                 }
             } else {
@@ -516,6 +568,259 @@ class PlutoKernel {
         }
     }
 
+    /**
+     * Parse Pluto's error output format
+     */
+    private parseErrorOutput(body: string, mime: string): string {
+        let errorText = body;
+
+        if (mime === 'application/vnd.pluto.stacktrace+object') {
+            try {
+                const errorObj = JSON.parse(body);
+                // Pluto sends stacktrace as an object with msg field
+                if (errorObj.msg) {
+                    errorText = errorObj.msg;
+                } else if (Array.isArray(errorObj) && errorObj.length > 0) {
+                    // Try to extract error message from the structure
+                    const firstFrame = errorObj[0];
+                    if (firstFrame.msg) {
+                        errorText = firstFrame.msg;
+                    } else {
+                        // Fallback to stringified JSON
+                        errorText = JSON.stringify(errorObj, null, 2);
+                    }
+                } else {
+                    // Fallback to stringified JSON
+                    errorText = JSON.stringify(errorObj, null, 2);
+                }
+            } catch {
+                // If parsing fails, return as-is
+            }
+        }
+
+        return this.addErrorHints(errorText);
+    }
+
+    /**
+     * Parse Pluto's tree object format into a readable string
+     * This handles application/vnd.pluto.tree+object mimetype
+     */
+    private parsePlutoTreeObject(body: string): string {
+        // Check if body is just an objectid (hex string) - Pluto sometimes sends this
+        if (/^[0-9a-f]{16}$/i.test(body)) {
+            console.log('[PlutoKernel] Tree object is just objectid, returning placeholder');
+            return '(computing...)';
+        }
+
+        try {
+            const treeObj = JSON.parse(body);
+            console.log('[PlutoKernel] Tree object structure:', JSON.stringify(treeObj, null, 2).substring(0, 3000));
+            const result = this.extractPlutoTree(treeObj);
+            console.log('[PlutoKernel] Tree object result:', result);
+            return result;
+        } catch (e) {
+            console.log('[PlutoKernel] Tree object parse error:', e);
+            // If parsing fails, return as-is (might be plain text)
+            return body;
+        }
+    }
+
+    /**
+     * Extract displayable text from Pluto tree object
+     */
+    private extractPlutoTree(obj: unknown): string {
+        if (obj === null || obj === undefined) return 'nothing';
+        if (typeof obj === 'string') return obj;
+        if (typeof obj === 'number' || typeof obj === 'boolean') return String(obj);
+
+        if (typeof obj !== 'object') return String(obj);
+
+        const record = obj as Record<string, unknown>;
+
+        // Check if it's a mime/body object (leaf value)
+        if ('mime' in record && 'body' in record) {
+            const body = record.body;
+            if (typeof body === 'string') return body;
+            return this.extractPlutoTree(body);
+        }
+
+        // Get Pluto type
+        const plutoType = record.type as string | undefined;
+
+        // Handle circular reference
+        if (plutoType === 'circular') {
+            return '(circular reference)';
+        }
+
+        // Handle Pair
+        if (plutoType === 'Pair' && 'key_value' in record) {
+            const kv = record.key_value as unknown[];
+            if (Array.isArray(kv) && kv.length === 2) {
+                return `${this.extractPlutoTree(kv[0])} => ${this.extractPlutoTree(kv[1])}`;
+            }
+        }
+
+        // Get prefix for type display
+        const prefix = (record.prefix_short || record.prefix || '') as string;
+
+        // Handle collections with elements
+        if ('elements' in record && Array.isArray(record.elements)) {
+            const elements = record.elements as unknown[];
+            const filtered = elements.filter(el => el !== 'more');
+
+            if (filtered.length === 0) {
+                // Empty collection - show type
+                return prefix || `${plutoType || 'Collection'}()`;
+            }
+
+            // Extract first few elements
+            const items: string[] = [];
+            for (let i = 0; i < Math.min(5, filtered.length); i++) {
+                const elem = filtered[i];
+                items.push(this.extractPlutoElement(elem));
+            }
+
+            const hasMore = elements.includes('more') || filtered.length > 5;
+            if (hasMore) {
+                items.push('...');
+            }
+
+            // Format based on type
+            const itemsStr = items.join(', ');
+            if (plutoType === 'Tuple') return `(${itemsStr})`;
+            if (plutoType === 'NamedTuple') return `(${itemsStr})`;
+            if (plutoType === 'Dict') return prefix ? `${prefix}(${itemsStr})` : `Dict(${itemsStr})`;
+            if (plutoType === 'Set') return prefix ? `${prefix}([${itemsStr}])` : `Set([${itemsStr}])`;
+            if (plutoType === 'Array') return prefix ? `${prefix}[${itemsStr}]` : `[${itemsStr}]`;
+            if (plutoType === 'struct') return prefix ? `${prefix}(${itemsStr})` : `(${itemsStr})`;
+
+            return prefix ? `${prefix}[${itemsStr}]` : `[${itemsStr}]`;
+        }
+
+        // Fallback to prefix/type display
+        if (prefix) return prefix;
+        if (plutoType) return `<${plutoType}>`;
+        if ('objectid' in record) return `<object>`;
+
+        return JSON.stringify(obj).substring(0, 100);
+    }
+
+    /**
+     * Extract a single element from Pluto tree elements array
+     * Pluto format: [index, [body, mime]] for Array/Set/Tuple
+     *               [key, value] for Dict (both are mimepairs)
+     *               [fieldname, [body, mime]] for struct/NamedTuple
+     */
+    private extractPlutoElement(elem: unknown): string {
+        if (elem === null || elem === undefined) return 'nothing';
+        if (typeof elem === 'string') return elem;
+        if (typeof elem === 'number' || typeof elem === 'boolean') return String(elem);
+
+        // Handle array element
+        if (Array.isArray(elem)) {
+            if (elem.length === 2) {
+                const [key, value] = elem;
+
+                // Check if value is a mimepair: [body, mime]
+                if (Array.isArray(value) && value.length === 2) {
+                    const [body, mime] = value;
+                    // For arrays with numeric index, just show the value
+                    if (typeof key === 'number') {
+                        return this.extractMimepairValue(body, mime as string);
+                    }
+                    // For named fields (struct, NamedTuple), show name = value
+                    if (typeof key === 'string') {
+                        const valueStr = this.extractMimepairValue(body, mime as string);
+                        return `${key} = ${valueStr}`;
+                    }
+                    // For Dict, key is also a mimepair
+                    if (Array.isArray(key) && key.length === 2) {
+                        const keyStr = this.extractMimepairValue(key[0], key[1] as string);
+                        const valueStr = this.extractMimepairValue(body, mime as string);
+                        return `${keyStr} => ${valueStr}`;
+                    }
+                }
+
+                // Fallback: treat as [key, value] pair
+                const valueStr = this.extractPlutoTree(value);
+                if (typeof key === 'number') {
+                    return valueStr;
+                }
+                const keyStr = this.extractPlutoTree(key);
+                return `${keyStr} = ${valueStr}`;
+            }
+            // Other arrays
+            return elem.map(e => this.extractPlutoTree(e)).join(', ');
+        }
+
+        // It's an object - delegate to extractPlutoTree
+        return this.extractPlutoTree(elem);
+    }
+
+    /**
+     * Extract value from Pluto mimepair [body, mime]
+     */
+    private extractMimepairValue(body: unknown, mime: string): string {
+        // If body is a string, return it directly
+        if (typeof body === 'string') {
+            return body;
+        }
+        // If body is a tree object, recurse
+        if (body && typeof body === 'object') {
+            return this.extractPlutoTree(body);
+        }
+        return String(body);
+    }
+
+    /**
+     * Add helpful hints for common errors
+     */
+    private addErrorHints(errorText: string): string {
+        // Add helpful hint for "extra token" error (multiple expressions in one cell)
+        if (errorText.includes('extra token after end of expression')) {
+            errorText += '\n\n💡 Pluto requires each cell to contain a single expression.';
+            errorText += '\n   Wrap your code in begin...end to fix this.';
+        }
+
+        return errorText;
+    }
+
+    /**
+     * Show a notification suggesting to wrap cell in begin...end
+     */
+    private showWrapSuggestion(cellId: string): void {
+        // Find the cell index
+        let cellIndex = -1;
+        for (let i = 0; i < this.notebook.cellCount; i++) {
+            const cell = this.notebook.cellAt(i);
+            if (getCellId(cell) === cellId) {
+                cellIndex = i;
+                break;
+            }
+        }
+
+        if (cellIndex === -1) return;
+
+        // Show notification with button
+        vscode.window.showWarningMessage(
+            'Pluto requires each cell to contain a single expression. Wrap your code in begin...end?',
+            'Wrap in begin...end',
+            'Dismiss'
+        ).then(async (selection) => {
+            if (selection === 'Wrap in begin...end') {
+                // Select the cell and run the wrap command
+                const notebookEditor = vscode.window.activeNotebookEditor;
+                if (notebookEditor && notebookEditor.notebook.uri.toString() === this.notebook.uri.toString()) {
+                    // Select the cell
+                    const range = new vscode.NotebookRange(cellIndex, cellIndex + 1);
+                    notebookEditor.selections = [range];
+                    // Run the wrap command
+                    await vscode.commands.executeCommand('pluto-notebook.wrapInBeginEnd');
+                }
+            }
+        });
+    }
+
     dispose(): void {
         this.stop();
     }
@@ -528,6 +833,11 @@ export class PlutoNotebookController implements vscode.Disposable {
     private controller: vscode.NotebookController;
     private kernels = new Map<string, PlutoKernel>();
     private disposables: vscode.Disposable[] = [];
+
+    // Expose kernels for bond updates
+    getKernelForNotebook(notebook: vscode.NotebookDocument): PlutoKernel | undefined {
+        return this.kernels.get(notebook.uri.toString());
+    }
 
     constructor() {
         this.controller = vscode.notebooks.createNotebookController(

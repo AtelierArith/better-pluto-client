@@ -4,19 +4,40 @@
 using Markdown
 using InteractiveUtils
 
-# ╔═╡ ed09a15c-fb46-471e-b31f-9018047d881f
-y = x
-
-# ╔═╡ 3d34e610-d569-4a78-afbe-f3657b21bab4
+# ╔═╡ 2d9e9e13-f659-4fd3-b318-6bd3016fbc38
 begin
-    z = 5 + 2y
-    println(z)
+    using Plots
+    import ImageShow
+    using TestImages
+    using PlutoUI
 end
 
-# ╔═╡ 96d491cb-6963-4dab-9e6b-6da7b0d7ec70
-x = 1
+# ╔═╡ 1a453479-8e69-4c0e-8d2f-4578d5b74353
+@bind z Slider([1, 2, 3, 4, 5])
+
+# ╔═╡ 636f16e1-b458-4d38-abe1-92f24d7173da
+println(z)
+
+# ╔═╡ de2172e1-0c9c-44bb-bb14-f5935004e5cd
+begin
+    x = -pi:0.01:pi
+    y = sin.(x)
+end
+
+# ╔═╡ cfec83b9-4cb3-4f5d-b6ef-799076b66485
+plot(x, y)
+
+# ╔═╡ 08311720-0b8b-4c29-9ec3-4593231e3ad3
+testimage("mand")
+
+# ╔═╡ f64c9a4d-4ad8-4f0c-9641-9e9a1613ab0a
+
 
 # ╔═╡ Cell order:
-# ╠═ed09a15c-fb46-471e-b31f-9018047d881f
-# ╠═3d34e610-d569-4a78-afbe-f3657b21bab4
-# ╠═96d491cb-6963-4dab-9e6b-6da7b0d7ec70
+# ╠═2d9e9e13-f659-4fd3-b318-6bd3016fbc38
+# ╠═1a453479-8e69-4c0e-8d2f-4578d5b74353
+# ╠═636f16e1-b458-4d38-abe1-92f24d7173da
+# ╠═de2172e1-0c9c-44bb-bb14-f5935004e5cd
+# ╠═cfec83b9-4cb3-4f5d-b6ef-799076b66485
+# ╠═08311720-0b8b-4c29-9ec3-4593231e3ad3
+# ╠═f64c9a4d-4ad8-4f0c-9641-9e9a1613ab0a
