@@ -457,18 +457,32 @@ export class PlutoServer extends EventEmitter {
             // Body can be string or object (for complex types like msgpack binary)
             // First try to decode msgpack binary format
             const decodedBody = this.tryDecodeMsgpackBinary(value, output.mime || 'text/plain');
+            let newBody: string | undefined;
+
             if (decodedBody !== null) {
-                output.body = decodedBody;
+                newBody = decodedBody;
             } else if (typeof value === 'string') {
-                output.body = value;
+                newBody = value;
             } else if (value && typeof value === 'object') {
                 // For complex output like errors, try to extract msg or stringify
                 const obj = value as Record<string, unknown>;
                 if (obj.msg) {
-                    output.body = obj.msg as string;
+                    newBody = obj.msg as string;
                 } else {
-                    output.body = JSON.stringify(value);
+                    newBody = JSON.stringify(value);
                 }
+            }
+
+            // For tree+object, don't overwrite existing data with just an objectid
+            const isObjectIdOnly = output.mime === 'application/vnd.pluto.tree+object' &&
+                                   newBody && /^[0-9a-f]{16}$/i.test(newBody);
+            if (isObjectIdOnly && output.body && output.body.length > 16) {
+                console.log(`[PlutoServer] Cell ${cellId} skipping objectid-only update, keeping existing tree data`);
+                return; // Don't emit update
+            }
+
+            if (newBody !== undefined) {
+                output.body = newBody;
             }
             console.log(`[PlutoServer] Cell ${cellId} output.body: ${output.body?.slice(0, 100)}`);
         } else if (subField === 'mime') {
