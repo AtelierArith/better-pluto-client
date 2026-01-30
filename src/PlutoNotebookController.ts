@@ -184,9 +184,57 @@ class PlutoKernel {
             });
         }
 
-        for (const cell of cells) {
-            await this.executeCell(cell);
+        if (cells.length === 1) {
+            // Single cell: use existing method
+            await this.executeCell(cells[0]);
+        } else {
+            // Multiple cells (Run All): batch execution
+            await this.executeCellsBatch(cells);
         }
+    }
+
+    /**
+     * Execute multiple cells in batch (more efficient for Run All)
+     */
+    private async executeCellsBatch(cells: vscode.NotebookCell[]): Promise<void> {
+        const cellIds: string[] = [];
+        const executions: Map<string, vscode.NotebookCellExecution> = new Map();
+
+        // Prepare all cells: ensure IDs, create executions, update code
+        for (const cell of cells) {
+            let cellId = getCellId(cell);
+            if (!cellId) {
+                cellId = generateCellId();
+                await setCellId(cell, cellId);
+            }
+
+            // End any existing execution
+            const existingExecution = this.cellExecutions.get(cellId);
+            if (existingExecution) {
+                try { existingExecution.end(false, Date.now()); } catch {}
+                this.cellExecutions.delete(cellId);
+            }
+
+            // Create execution
+            const execution = this.controller.createNotebookCellExecution(cell);
+            this.cellExecutions.set(cellId, execution);
+            executions.set(cellId, execution);
+
+            execution.start(Date.now());
+            execution.clearOutput();
+
+            cellIds.push(cellId);
+
+            // Update cell code in Pluto
+            const code = cell.document.getText();
+            console.log(`[PlutoKernel] Batch: updating cell ${cellId}`);
+            await this.server.updateCell(cellId, code);
+        }
+
+        // Run all cells at once
+        console.log(`[PlutoKernel] Batch: running ${cellIds.length} cells`);
+        await this.server.runMultipleCells(cellIds);
+        console.log(`[PlutoKernel] Batch: run request sent`);
     }
 
     /**
@@ -242,8 +290,11 @@ class PlutoKernel {
         }
     }
 
+    // Track cells that have been modified since last save
+    private modifiedCellIds = new Set<string>();
+
     /**
-     * Handle notebook changes (cell added/removed/reordered)
+     * Handle notebook changes (cell added/removed/reordered/modified)
      */
     async handleNotebookChange(e: vscode.NotebookDocumentChangeEvent): Promise<void> {
         if (!this._isRunning) return;
@@ -259,6 +310,7 @@ class PlutoKernel {
                     removedCellIds.push(cellId);
                     this.knownCellIds.delete(cellId);
                     this.cellOutputs.delete(cellId);
+                    this.modifiedCellIds.delete(cellId);
                 }
             }
 
@@ -273,6 +325,24 @@ class PlutoKernel {
 
                 addedCellIds.push(cellId);
                 this.knownCellIds.add(cellId);
+            }
+        }
+
+        // Track cell content changes (for Cmd+S execution)
+        console.log(`[PlutoKernel] cellChanges count: ${e.cellChanges.length}`);
+        for (const cellChange of e.cellChanges) {
+            console.log(`[PlutoKernel] cellChange:`, {
+                hasDocument: !!cellChange.document,
+                hasMetadata: !!cellChange.metadata,
+                hasOutputs: !!cellChange.outputs,
+                hasExecutionSummary: !!cellChange.executionSummary
+            });
+            if (cellChange.document) {
+                const cellId = getCellId(cellChange.cell);
+                if (cellId) {
+                    console.log(`[PlutoKernel] Cell ${cellId} content changed`);
+                    this.modifiedCellIds.add(cellId);
+                }
             }
         }
 
@@ -309,6 +379,39 @@ class PlutoKernel {
 
             // Always sync the full cell order after structural changes
             await this.syncCellOrder();
+        }
+    }
+
+    /**
+     * Handle notebook save - execute modified cells
+     */
+    async handleNotebookSave(): Promise<void> {
+        console.log(`[PlutoKernel] handleNotebookSave called, isRunning=${this._isRunning}, modifiedCells=${this.modifiedCellIds.size}`);
+        if (!this._isRunning) return;
+
+        if (this.modifiedCellIds.size === 0) {
+            console.log('[PlutoKernel] No modified cells to execute on save');
+            return;
+        }
+
+        console.log(`[PlutoKernel] Executing ${this.modifiedCellIds.size} modified cells on save`);
+
+        // Find the cells to execute
+        const cellsToExecute: vscode.NotebookCell[] = [];
+        for (let i = 0; i < this.notebook.cellCount; i++) {
+            const cell = this.notebook.cellAt(i);
+            const cellId = getCellId(cell);
+            if (cellId && this.modifiedCellIds.has(cellId)) {
+                cellsToExecute.push(cell);
+            }
+        }
+
+        // Clear modified cells before execution
+        this.modifiedCellIds.clear();
+
+        // Execute the cells
+        if (cellsToExecute.length > 0) {
+            await this.executeCells(cellsToExecute);
         }
     }
 
@@ -1347,6 +1450,19 @@ export class PlutoNotebookController implements vscode.Disposable {
     }
 
     /**
+     * Execute modified cells for a notebook (called on Cmd+S)
+     */
+    async executeModifiedCells(notebook: vscode.NotebookDocument): Promise<void> {
+        const key = notebook.uri.toString();
+        const kernel = this.kernels.get(key);
+        if (kernel && kernel.isRunning) {
+            await kernel.handleNotebookSave();
+        } else {
+            console.log('[PlutoController] Cannot execute modified cells, kernel not running');
+        }
+    }
+
+    /**
      * Get a published object from Pluto (for "show more" in tree views)
      */
     async getPublishedObject(notebook: vscode.NotebookDocument, objectid: string): Promise<void> {
@@ -1383,6 +1499,13 @@ export class PlutoNotebookController implements vscode.Disposable {
         this.disposables.push(
             vscode.workspace.onDidChangeNotebookDocument(e => {
                 this.handleNotebookChange(e);
+            })
+        );
+
+        // Listen for notebook save - execute modified cells on Cmd+S
+        this.disposables.push(
+            vscode.workspace.onDidSaveNotebookDocument(notebook => {
+                this.handleNotebookSave(notebook);
             })
         );
 
@@ -1483,6 +1606,19 @@ export class PlutoNotebookController implements vscode.Disposable {
         const kernel = this.kernels.get(key);
         if (kernel && kernel.isRunning) {
             await kernel.handleNotebookChange(e);
+        }
+    }
+
+    /**
+     * Handle notebook save - execute modified cells
+     */
+    private async handleNotebookSave(notebook: vscode.NotebookDocument): Promise<void> {
+        console.log(`[PlutoNotebookController] handleNotebookSave called for ${notebook.uri.toString()}`);
+        const key = notebook.uri.toString();
+        const kernel = this.kernels.get(key);
+        console.log(`[PlutoNotebookController] kernel found: ${!!kernel}, isRunning: ${kernel?.isRunning}`);
+        if (kernel && kernel.isRunning) {
+            await kernel.handleNotebookSave();
         }
     }
 
