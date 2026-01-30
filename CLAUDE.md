@@ -1,4 +1,4 @@
-# Modern Pluto Client - VS Code Extension
+# BetterPlutoClient - VS Code Extension
 
 ## プロジェクト概要
 
@@ -218,7 +218,7 @@ node test-pluto-connection.js
 npx vsce package
 
 # 2. Cursor にインストール
-cursor --install-extension modern-pluto-client-0.0.1.vsix
+cursor --install-extension better-pluto-client-0.0.1.vsix
 
 # 3. インストール確認
 cursor --list-extensions | grep pluto
@@ -230,17 +230,17 @@ cursor --list-extensions | grep pluto
 
 ```bash
 # VS Code にインストール
-code --install-extension modern-pluto-client-0.0.1.vsix
+code --install-extension better-pluto-client-0.0.1.vsix
 ```
 
 ### アンインストール
 
 ```bash
 # Cursor からアンインストール
-cursor --uninstall-extension undefined_publisher.modern-pluto-client
+cursor --uninstall-extension undefined_publisher.better-pluto-client
 
 # VS Code からアンインストール
-code --uninstall-extension undefined_publisher.modern-pluto-client
+code --uninstall-extension undefined_publisher.better-pluto-client
 ```
 
 ### 開発中のデバッグ実行（推奨）
@@ -257,7 +257,7 @@ VSIX を作らずに素早くテストする場合：
 ### 動作確認
 
 1. `yarn compile` でビルド
-2. `npx vsce package && cursor --install-extension modern-pluto-client-0.0.1.vsix`
+2. `npx vsce package && cursor --install-extension better-pluto-client-0.0.1.vsix`
 3. Cursor を再起動
 4. `samples/Basic.jl` を開く
 5. セルの追加・削除・実行をテスト

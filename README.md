@@ -1,4 +1,4 @@
-# Modern Pluto Client
+# BetterPlutoClient
 
 A VS Code extension for editing Pluto.jl notebooks with **full native editor support**.
 

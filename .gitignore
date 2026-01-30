@@ -6,6 +6,8 @@ node_modules
 
 # Reference implementations (for local development only)
 Pluto.jl/
+PlutoUI.jl/
 vscode-jupyter/
 vscode-marimo/
 julia-vscode/
+.DS_Store
