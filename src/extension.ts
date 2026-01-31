@@ -9,7 +9,7 @@
  */
 
 import * as vscode from 'vscode';
-import { PlutoNotebookSerializer } from './PlutoNotebookSerializer';
+import { PlutoNotebookSerializer, isCellFolded, toggleCellFolded } from './PlutoNotebookSerializer';
 import { PlutoNotebookController } from './PlutoNotebookController';
 
 const NOTEBOOK_TYPE = 'pluto-notebook';
@@ -43,8 +43,6 @@ export function activate(context: vscode.ExtensionContext) {
 
     // Setup renderer messaging for interactive widgets (Slider, etc.)
     setupRendererMessaging(context);
-
-    console.log('[PlutoExtension] Extension activation complete');
 
     // Register commands
     context.subscriptions.push(
@@ -171,6 +169,71 @@ export function activate(context: vscode.ExtensionContext) {
             vscode.window.showInformationMessage('Cell wrapped in begin...end');
         })
     );
+
+    // Command to toggle cell code visibility (fold/unfold)
+    context.subscriptions.push(
+        vscode.commands.registerCommand('pluto-notebook.toggleCellFolded', async (cellArg?: vscode.NotebookCell | { cell?: vscode.NotebookCell }) => {
+            console.log('[PlutoExtension] toggleCellFolded called with arg:', cellArg);
+
+            // If called from cell title bar, the argument is the cell directly or {cell: ...}
+            let targetCell: vscode.NotebookCell | undefined;
+            if (cellArg) {
+                if ('document' in cellArg && 'index' in cellArg) {
+                    // It's a NotebookCell directly
+                    targetCell = cellArg as vscode.NotebookCell;
+                } else if ('cell' in cellArg && cellArg.cell) {
+                    // It's {cell: NotebookCell}
+                    targetCell = cellArg.cell;
+                }
+            }
+
+            if (targetCell) {
+                // Update our custom metadata for file saving
+                const newFolded = await toggleCellFolded(targetCell);
+                console.log(`[PlutoExtension] Cell ${targetCell.index} folded: ${newFolded}`);
+
+                // Use VS Code's built-in collapse command for visual effect
+                // First, select the cell
+                const notebookEditor = vscode.window.activeNotebookEditor;
+                if (notebookEditor) {
+                    // Select the cell
+                    notebookEditor.selection = new vscode.NotebookRange(targetCell.index, targetCell.index + 1);
+
+                    // Use VS Code's built-in command to toggle collapse
+                    if (newFolded) {
+                        await vscode.commands.executeCommand('notebook.cell.collapseCellInput');
+                    } else {
+                        await vscode.commands.executeCommand('notebook.cell.expandCellInput');
+                    }
+                }
+                return;
+            }
+
+            // Otherwise, use selection
+            const notebookEditor = vscode.window.activeNotebookEditor;
+            if (!notebookEditor) {
+                vscode.window.showErrorMessage('No active notebook');
+                return;
+            }
+
+            const selections = notebookEditor.selections;
+            if (selections.length === 0) {
+                vscode.window.showErrorMessage('No cell selected');
+                return;
+            }
+
+            // Toggle folded state for all selected cells
+            for (const cellRange of selections) {
+                for (let i = cellRange.start; i < cellRange.end; i++) {
+                    const cell = notebookEditor.notebook.cellAt(i);
+                    const newFolded = await toggleCellFolded(cell);
+                    console.log(`[PlutoExtension] Cell ${i} folded: ${newFolded}`);
+                }
+            }
+        })
+    );
+
+    console.log('[PlutoExtension] Extension activation complete');
 }
 
 /**
