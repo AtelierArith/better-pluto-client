@@ -5,19 +5,22 @@
 export interface PlutoCell {
     id: string;
     code: string;
+    kind: 'code' | 'markdown';
+    folded: boolean;
 }
 
 export interface PlutoNotebook {
     version: string;
     cells: Map<string, PlutoCell>;
     cellOrder: string[];
+    foldedCells: Set<string>;  // Track which cells are folded
     preamble: string;
 }
 
 const CELL_MARKER = /^# ╔═╡ ([0-9a-f-]+)$/;
 const CELL_ORDER_START = /^# ╔═╡ Cell order:$/;
-// Cell order uses ╠═ for visible cells or ╟═ for hidden cells
-const CELL_ORDER_ITEM = /^# [╠╟]═([0-9a-f-]+)$/;
+// Cell order uses ╠═ for visible cells or ╟─ for hidden (folded) cells
+const CELL_ORDER_ITEM = /^# ([╠╟])[═─]([0-9a-f-]+)$/;
 const VERSION_PATTERN = /^# v(\d+\.\d+\.\d+)$/;
 
 /**
@@ -29,6 +32,7 @@ export function parse(content: string): PlutoNotebook {
     let version = '0.20.0';
     const cells = new Map<string, PlutoCell>();
     const cellOrder: string[] = [];
+    const foldedCells = new Set<string>();
     const preambleLines: string[] = [];
 
     let currentCellId: string | null = null;
@@ -53,9 +57,14 @@ export function parse(content: string): PlutoNotebook {
         if (CELL_ORDER_START.test(line)) {
             // Save current cell if any
             if (currentCellId) {
+                const cellCode = currentCellLines.join('\n').trim();
+                const cellKind = detectCellKind(cellCode);
+                // Keep md"""...""" syntax as-is (don't extract content)
                 cells.set(currentCellId, {
                     id: currentCellId,
-                    code: currentCellLines.join('\n').trim()
+                    code: cellCode,
+                    kind: cellKind,
+                    folded: false  // Will be updated later from cell order
                 });
             }
             inCellOrder = true;
@@ -65,7 +74,13 @@ export function parse(content: string): PlutoNotebook {
         if (inCellOrder) {
             const orderMatch = line.match(CELL_ORDER_ITEM);
             if (orderMatch) {
-                cellOrder.push(orderMatch[1]);
+                const delimiter = orderMatch[1];  // ╠ or ╟
+                const cellId = orderMatch[2];
+                cellOrder.push(cellId);
+                // ╟─ means folded (hidden code)
+                if (delimiter === '╟') {
+                    foldedCells.add(cellId);
+                }
             }
             continue;
         }
@@ -75,9 +90,14 @@ export function parse(content: string): PlutoNotebook {
         if (cellMatch) {
             // Save previous cell
             if (currentCellId) {
+                const cellCode = currentCellLines.join('\n').trim();
+                const cellKind = detectCellKind(cellCode);
+                // Keep md"""...""" syntax as-is (don't extract content)
                 cells.set(currentCellId, {
                     id: currentCellId,
-                    code: currentCellLines.join('\n').trim()
+                    code: cellCode,
+                    kind: cellKind,
+                    folded: false  // Will be updated later from cell order
                 });
             } else if (inPreamble) {
                 inPreamble = false;
@@ -98,16 +118,27 @@ export function parse(content: string): PlutoNotebook {
 
     // Save last cell if not in cell order
     if (currentCellId && !inCellOrder) {
+        const cellCode = currentCellLines.join('\n').trim();
+        const cellKind = detectCellKind(cellCode);
+        // Keep md"""...""" syntax as-is (don't extract content)
         cells.set(currentCellId, {
             id: currentCellId,
-            code: currentCellLines.join('\n').trim()
+            code: cellCode,
+            kind: cellKind,
+            folded: false  // Will be updated later from cell order
         });
+    }
+
+    // Update cells with folded state
+    for (const [id, cell] of cells) {
+        cell.folded = foldedCells.has(id);
     }
 
     return {
         version,
         cells,
         cellOrder,
+        foldedCells,
         preamble: preambleLines.join('\n').trim()
     };
 }
@@ -132,17 +163,72 @@ export function serialize(notebook: PlutoNotebook): string {
     // Cells
     for (const [id, cell] of notebook.cells) {
         lines.push(`# ╔═╡ ${id}`);
-        lines.push(cell.code);
+        // Code is stored as-is (md"""...""" cells already have the wrapper)
+        // Remove leading newline if it was added for folding display
+        let code = cell.code;
+        if (cell.folded && code.startsWith('\n')) {
+            code = code.substring(1);
+        }
+        lines.push(code);
         lines.push('');
     }
 
     // Cell order
     lines.push('# ╔═╡ Cell order:');
     for (const id of notebook.cellOrder) {
-        lines.push(`# ╠═${id}`);
+        const cell = notebook.cells.get(id);
+        // Use ╟─ for folded cells, ╠═ for visible cells
+        const delimiter = cell?.folded ? '# ╟─' : '# ╠═';
+        lines.push(`${delimiter}${id}`);
     }
 
     return lines.join('\n');
+}
+
+/**
+ * Detect if a cell is a Markdown cell (starts with md""")
+ */
+export function detectCellKind(code: string): 'code' | 'markdown' {
+    const trimmed = code.trim();
+    // Check if code starts with md""" (possibly with whitespace)
+    return trimmed.startsWith('md"""') ? 'markdown' : 'code';
+}
+
+/**
+ * Extract Markdown content from md"""...""" wrapper
+ * Handles both single-line and multi-line cases
+ */
+function extractMarkdownContent(code: string): string {
+    const trimmed = code.trim();
+    if (!trimmed.startsWith('md"""')) {
+        return code;
+    }
+
+    // Find the opening md"""
+    const startIdx = trimmed.indexOf('md"""');
+    if (startIdx === -1) {
+        return code;
+    }
+
+    // Find the closing """
+    // Start searching after md"""
+    let searchStart = startIdx + 5;
+    let endIdx = trimmed.indexOf('"""', searchStart);
+
+    // If not found, try to find it at the end
+    if (endIdx === -1) {
+        if (trimmed.endsWith('"""')) {
+            endIdx = trimmed.length - 3;
+        } else {
+            // No closing found, return as-is
+            return code;
+        }
+    }
+
+    // Extract content between md""" and """
+    const content = trimmed.substring(startIdx + 5, endIdx);
+
+    return content;
 }
 
 /**

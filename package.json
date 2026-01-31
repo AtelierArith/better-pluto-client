@@ -77,6 +77,12 @@
         "command": "pluto-notebook.saveAndExecute",
         "title": "Save and Execute Modified Cells",
         "category": "Pluto"
+      },
+      {
+        "command": "pluto-notebook.toggleCellFolded",
+        "title": "Toggle Cell Code Visibility (Fold/Unfold)",
+        "category": "Pluto",
+        "icon": "$(eye)"
       }
     ],
     "menus": {
@@ -116,6 +122,11 @@
           "command": "pluto-notebook.wrapInBeginEnd",
           "when": "notebookType == pluto-notebook && notebookCellType == code",
           "group": "inline@1"
+        },
+        {
+          "command": "pluto-notebook.toggleCellFolded",
+          "when": "notebookType == pluto-notebook",
+          "group": "inline@2"
         }
       ]
     },

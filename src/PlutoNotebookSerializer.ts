@@ -17,6 +17,7 @@ interface PlutoNotebookMetadata {
 
 interface PlutoCellMetadata {
     id: string;
+    folded?: boolean;  // Code is hidden (folded) in Pluto.jl
 }
 
 /**
@@ -94,16 +95,26 @@ export class PlutoNotebookSerializer implements vscode.NotebookSerializer {
             const cell = notebook.cells.get(cellId);
             if (!cell) continue;
 
+            // All cells are Code cells in Pluto.jl (including md"""...""" cells)
+            // Markdown cells use md"""...""" syntax which is Julia code
+            // For folded cells, add leading newline so the collapsed preview is empty
+            let code = cell.code;
+            if (cell.folded && !code.startsWith('\n')) {
+                code = '\n' + code;
+            }
             const cellData = new vscode.NotebookCellData(
                 vscode.NotebookCellKind.Code,
-                cell.code,
+                code,
                 JULIA_LANGUAGE_ID
             );
 
-            // Store cell ID in metadata
+            // Store cell ID and folded state in metadata
+            // Use inputCollapsed to visually hide the cell input when folded
             cellData.metadata = {
+                inputCollapsed: cell.folded,  // VS Code native property to collapse input
                 custom: {
-                    id: cellId
+                    id: cellId,
+                    folded: cell.folded
                 } as PlutoCellMetadata
             };
 
@@ -119,7 +130,8 @@ export class PlutoNotebookSerializer implements vscode.NotebookSerializer {
             );
             emptyCell.metadata = {
                 custom: {
-                    id: parser.generateCellId()
+                    id: parser.generateCellId(),
+                    folded: false
                 } as PlutoCellMetadata
             };
             cells.push(emptyCell);
@@ -146,6 +158,7 @@ export class PlutoNotebookSerializer implements vscode.NotebookSerializer {
 
         const cells = new Map<string, parser.PlutoCell>();
         const cellOrder: string[] = [];
+        const foldedCells = new Set<string>();
 
         for (const cellData of data.cells) {
             const cellMetadata = (cellData.metadata?.custom || {}) as PlutoCellMetadata;
@@ -156,10 +169,22 @@ export class PlutoNotebookSerializer implements vscode.NotebookSerializer {
                 cellId = parser.generateCellId();
             }
 
+            // All cells are Code cells - detect markdown by md"""...""" syntax
+            const code = cellData.value;
+            const cellKind = parser.detectCellKind(code);
+            // Check both inputCollapsed (VS Code native) and custom.folded
+            const folded = cellData.metadata?.inputCollapsed ?? cellMetadata.folded ?? false;
+
             cells.set(cellId, {
                 id: cellId,
-                code: cellData.value
+                code: code,
+                kind: cellKind,
+                folded: folded
             });
+
+            if (folded) {
+                foldedCells.add(cellId);
+            }
 
             cellOrder.push(cellId);
         }
@@ -168,6 +193,7 @@ export class PlutoNotebookSerializer implements vscode.NotebookSerializer {
             version: metadata.version || '0.20.0',
             cells,
             cellOrder,
+            foldedCells,
             preamble: metadata.preamble || ''
         };
     }
@@ -183,7 +209,7 @@ export class PlutoNotebookSerializer implements vscode.NotebookSerializer {
             JULIA_LANGUAGE_ID
         );
         cell.metadata = {
-            custom: { id: cellId } as PlutoCellMetadata
+            custom: { id: cellId, folded: false } as PlutoCellMetadata
         };
 
         const notebookData = new vscode.NotebookData([cell]);
@@ -208,7 +234,7 @@ export class PlutoNotebookSerializer implements vscode.NotebookSerializer {
             JULIA_LANGUAGE_ID
         );
         cell.metadata = {
-            custom: { id: cellId } as PlutoCellMetadata
+            custom: { id: cellId, folded: false } as PlutoCellMetadata
         };
 
         const notebookData = new vscode.NotebookData([cell]);
@@ -249,4 +275,74 @@ export async function setCellId(cell: vscode.NotebookCell, cellId: string): Prom
     ]);
 
     await vscode.workspace.applyEdit(edit);
+}
+
+/**
+ * Get folded state from cell metadata
+ */
+export function isCellFolded(cell: vscode.NotebookCell): boolean {
+    // Check both inputCollapsed (VS Code native) and custom.folded
+    if (cell.metadata?.inputCollapsed !== undefined) {
+        return cell.metadata.inputCollapsed;
+    }
+    const metadata = cell.metadata?.custom as PlutoCellMetadata | undefined;
+    return metadata?.folded ?? false;
+}
+
+/**
+ * Set folded state in cell metadata
+ */
+export async function setCellFolded(cell: vscode.NotebookCell, folded: boolean): Promise<void> {
+    const edit = new vscode.WorkspaceEdit();
+    const newMetadata = {
+        ...cell.metadata,
+        inputCollapsed: folded,  // VS Code native property to collapse input
+        custom: {
+            ...(cell.metadata?.custom || {}),
+            folded: folded
+        }
+    };
+
+    edit.set(cell.notebook.uri, [
+        vscode.NotebookEdit.updateCellMetadata(cell.index, newMetadata)
+    ]);
+
+    await vscode.workspace.applyEdit(edit);
+}
+
+/**
+ * Toggle folded state of a cell
+ */
+export async function toggleCellFolded(cell: vscode.NotebookCell): Promise<boolean> {
+    const currentFolded = isCellFolded(cell);
+    const newFolded = !currentFolded;
+
+    // Get current cell content
+    const currentCode = cell.document.getText();
+
+    const edit = new vscode.WorkspaceEdit();
+
+    if (newFolded) {
+        // When folding: add empty line at the beginning so the preview shows empty
+        if (!currentCode.startsWith('\n')) {
+            const fullRange = new vscode.Range(
+                cell.document.positionAt(0),
+                cell.document.positionAt(currentCode.length)
+            );
+            edit.replace(cell.document.uri, fullRange, '\n' + currentCode);
+        }
+    } else {
+        // When unfolding: remove the leading empty line if it was added
+        if (currentCode.startsWith('\n')) {
+            const fullRange = new vscode.Range(
+                cell.document.positionAt(0),
+                cell.document.positionAt(currentCode.length)
+            );
+            edit.replace(cell.document.uri, fullRange, currentCode.substring(1));
+        }
+    }
+
+    await vscode.workspace.applyEdit(edit);
+    await setCellFolded(cell, newFolded);
+    return newFolded;
 }

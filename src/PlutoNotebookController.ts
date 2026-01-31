@@ -200,8 +200,10 @@ class PlutoKernel {
         const cellIds: string[] = [];
         const executions: Map<string, vscode.NotebookCellExecution> = new Map();
 
+        console.log(`[PlutoKernel] Batch: preparing ${cells.length} cells for execution`);
         // Prepare all cells: ensure IDs, create executions, update code
         for (const cell of cells) {
+            console.log(`[PlutoKernel] Batch: processing cell, content preview: ${cell.document.getText().slice(0, 50)}`);
             let cellId = getCellId(cell);
             if (!cellId) {
                 cellId = generateCellId();
@@ -215,7 +217,7 @@ class PlutoKernel {
                 this.cellExecutions.delete(cellId);
             }
 
-            // Create execution
+            // Create execution (for both code and markdown cells)
             const execution = this.controller.createNotebookCellExecution(cell);
             this.cellExecutions.set(cellId, execution);
             executions.set(cellId, execution);
@@ -225,7 +227,7 @@ class PlutoKernel {
 
             cellIds.push(cellId);
 
-            // Update cell code in Pluto
+            // Update cell code in Pluto (md"""...""" cells already have the wrapper)
             const code = cell.document.getText();
             console.log(`[PlutoKernel] Batch: updating cell ${cellId}`);
             await this.server.updateCell(cellId, code);
@@ -248,7 +250,7 @@ class PlutoKernel {
             await setCellId(cell, cellId);
         }
 
-        // Get cell code
+        // Get cell code (md"""...""" cells already have the wrapper)
         const code = cell.document.getText();
         console.log(`[PlutoKernel] executeCell called for ${cellId}, code: "${code.slice(0, 50)}..."`);
 
@@ -448,12 +450,17 @@ class PlutoKernel {
     private async syncCellsWithPluto(): Promise<void> {
         for (let i = 0; i < this.notebook.cellCount; i++) {
             const cell = this.notebook.cellAt(i);
+
             let cellId = getCellId(cell);
 
             if (!cellId) {
                 cellId = generateCellId();
                 await setCellId(cell, cellId);
             }
+
+            // Update cell code in Pluto (md"""...""" cells already have the wrapper)
+            const code = cell.document.getText();
+            await this.server.updateCell(cellId, code);
         }
     }
 
@@ -500,7 +507,7 @@ class PlutoKernel {
             } else {
                 existingOutput.body = state.output.body;
                 existingOutput.mime = state.output.mime;
-                console.log(`[PlutoKernel] Cell ${cellId} output: ${existingOutput.body?.slice(0, 100)}`);
+                console.log(`[PlutoKernel] Cell ${cellId} output - mime: ${state.output.mime}, body preview: ${existingOutput.body?.slice(0, 100)}`);
             }
         }
 
@@ -602,9 +609,16 @@ class PlutoKernel {
                     ]));
                 } catch {
                     outputs.push(new vscode.NotebookCellOutput([
-                        vscode.NotebookCellOutputItem.text(existingOutput.body, mime)
+                        vscode.NotebookCellOutputItem.text(existingOutput.body, 'text/plain')
                     ]));
                 }
+            } else if (mime === 'text/plain') {
+                // For text/plain, ensure proper HTML escaping for display
+                // VS Code's default renderer should handle this, but we ensure it's safe
+                console.log(`[PlutoKernel] Rendering text/plain output for cell ${cellId}, body length: ${existingOutput.body.length}, preview: ${JSON.stringify(existingOutput.body.substring(0, 100))}`);
+                outputs.push(new vscode.NotebookCellOutput([
+                    vscode.NotebookCellOutputItem.text(existingOutput.body, 'text/plain')
+                ]));
             } else {
                 outputs.push(new vscode.NotebookCellOutput([
                     vscode.NotebookCellOutputItem.text(existingOutput.body, mime)
@@ -758,6 +772,23 @@ class PlutoKernel {
                 } catch {
                     outputs.push(new vscode.NotebookCellOutput([
                         vscode.NotebookCellOutputItem.text(existingOutput.body, mime)
+                    ]));
+                }
+            } else if (mime === 'text/plain') {
+                // For text/plain, check if it's actually HTML content that was mislabeled
+                // (This can happen with md"""...""" cells when mime arrives before body)
+                if (existingOutput.body.trim().startsWith('<')) {
+                    console.log(`[PlutoKernel] Cell ${cellId} output looks like HTML, treating as HTML`);
+                    const plutoMime = existingOutput.body.includes('<bond')
+                        ? 'application/vnd.pluto.html+html'
+                        : 'text/html';
+                    outputs.push(new vscode.NotebookCellOutput([
+                        vscode.NotebookCellOutputItem.text(existingOutput.body, plutoMime)
+                    ]));
+                } else {
+                    console.log(`[PlutoKernel] Rendering text/plain output (direct update) for cell ${cellId}, body length: ${existingOutput.body.length}, preview: ${JSON.stringify(existingOutput.body.substring(0, 100))}`);
+                    outputs.push(new vscode.NotebookCellOutput([
+                        vscode.NotebookCellOutputItem.text(existingOutput.body, 'text/plain')
                     ]));
                 }
             } else {
@@ -1525,6 +1556,12 @@ export class PlutoNotebookController implements vscode.Disposable {
         notebook: vscode.NotebookDocument,
         _controller: vscode.NotebookController
     ): Promise<void> {
+        console.log(`[PlutoController] executeHandler called with ${cells.length} cells`);
+        for (let i = 0; i < cells.length; i++) {
+            const cell = cells[i];
+            console.log(`[PlutoController] Cell ${i}: content=${cell.document.getText().slice(0, 50)}`);
+        }
+
         const kernel = await this.getOrCreateKernel(notebook);
         await kernel.executeCells(cells);
     }
