@@ -5,6 +5,7 @@
  */
 
 import type { RendererContext, OutputItem } from 'vscode-notebook-renderer';
+import katex from 'katex';
 
 interface PlutoBondMessage {
     type: 'setBond';
@@ -17,6 +18,221 @@ interface PlutoShowMoreMessage {
     objectid: string;
 }
 
+// Flag to track if KaTeX styles have been added
+let katexStylesAdded = false;
+
+/**
+ * Add KaTeX CSS styles to the document
+ */
+function addKaTeXStyles() {
+    if (katexStylesAdded) return;
+
+    const style = document.createElement('style');
+    style.textContent = `
+        /* KaTeX styles - minimal inline version */
+        .katex { font: normal 1.21em KaTeX_Main, Times New Roman, serif; line-height: 1.2; text-indent: 0; text-rendering: auto; }
+        .katex * { -ms-high-contrast-adjust: none !important; }
+        .katex .katex-html { display: inline-block; }
+        .katex .katex-mathml { position: absolute; clip: rect(1px, 1px, 1px, 1px); padding: 0; border: 0; height: 1px; width: 1px; overflow: hidden; }
+        .katex .base { position: relative; display: inline-block; }
+        .katex .strut { display: inline-block; }
+        .katex .textbf { font-weight: bold; }
+        .katex .textit { font-style: italic; }
+        .katex .textrm { font-family: KaTeX_Main; }
+        .katex .textsf { font-family: KaTeX_SansSerif; }
+        .katex .texttt { font-family: KaTeX_Typewriter; }
+        .katex .mathnormal { font-family: KaTeX_Math; font-style: italic; }
+        .katex .mathit { font-family: KaTeX_Main; font-style: italic; }
+        .katex .mathrm { font-style: normal; }
+        .katex .mathbf { font-family: KaTeX_Main; font-weight: bold; }
+        .katex .boldsymbol { font-family: KaTeX_Math; font-weight: bold; font-style: italic; }
+        .katex .amsrm { font-family: KaTeX_AMS; }
+        .katex .mathbb, .katex .textbb { font-family: KaTeX_AMS; }
+        .katex .mathcal { font-family: KaTeX_Caligraphic; }
+        .katex .mathfrak, .katex .textfrak { font-family: KaTeX_Fraktur; }
+        .katex .mathtt { font-family: KaTeX_Typewriter; }
+        .katex .mathscr, .katex .textscr { font-family: KaTeX_Script; }
+        .katex .mathsf, .katex .textsf { font-family: KaTeX_SansSerif; }
+        .katex .mord { }
+        .katex .mop { }
+        .katex .mbin { }
+        .katex .mrel { }
+        .katex .mopen { }
+        .katex .mclose { }
+        .katex .mpunct { }
+        .katex .minner { }
+        .katex .msupsub { text-align: left; }
+        .katex .mfrac > span > span { text-align: center; }
+        .katex .mfrac .frac-line { display: inline-block; width: 100%; border-bottom-style: solid; }
+        .katex .sqrt > .root { margin-left: 0.27777778em; margin-right: -0.55555556em; }
+        .katex .sizing, .katex .fontsize-ensurer { display: inline-block; }
+        .katex .delimsizing { }
+        .katex .nulldelimiter { display: inline-block; width: 0.12em; }
+        .katex .op-symbol { position: relative; }
+        .katex .op-limits > .vlist-t { text-align: center; }
+        .katex .accent > .vlist-t { text-align: center; }
+        .katex .vlist-t { display: inline-table; table-layout: fixed; }
+        .katex .vlist-r { display: table-row; }
+        .katex .vlist { display: table-cell; vertical-align: bottom; position: relative; }
+        .katex .vlist > span { display: block; height: 0; position: relative; }
+        .katex .vlist > span > span { display: inline-block; }
+        .katex .vlist > span > .pstrut { overflow: hidden; width: 0; }
+        .katex .vlist-s { display: table-cell; vertical-align: bottom; font-size: 1px; width: 0; }
+        .katex-display { display: block; margin: 1em 0; text-align: center; }
+        .katex-display > .katex { display: block; text-align: center; white-space: nowrap; }
+        .katex-display > .katex > .katex-html { display: block; position: relative; }
+        .katex-display > .katex > .katex-html > .tag { position: absolute; right: 0; }
+
+        /* Display math block styling */
+        .math-display {
+            display: block;
+            margin: 1em 0;
+            text-align: center;
+        }
+        .math-inline {
+            display: inline;
+        }
+    `;
+    document.head.appendChild(style);
+    katexStylesAdded = true;
+}
+
+/**
+ * Render math expressions in an element using KaTeX
+ *
+ * Pluto.jl wraps LaTeX in elements with class "tex":
+ * - Inline: <span class="tex">$formula$</span>
+ * - Block: <p class="tex">$$formula$$</p>
+ */
+function renderMathInElement(element: HTMLElement): void {
+    // Find all elements with class "tex" (Pluto.jl's convention)
+    const texElements = element.querySelectorAll('.tex');
+    console.log('[PlutoRenderer] Found .tex elements:', texElements.length);
+
+    texElements.forEach((texEl) => {
+        const text = texEl.textContent || '';
+        console.log('[PlutoRenderer] Processing .tex element:', text.slice(0, 100));
+
+        // Check for display math ($$...$$) or inline math ($...$)
+        const displayMatch = text.match(/^\$\$([\s\S]*)\$\$$/);
+        const inlineMatch = text.match(/^\$([\s\S]*)\$$/);
+
+        const isDisplay = displayMatch !== null;
+        const formula = isDisplay ? displayMatch[1] : (inlineMatch ? inlineMatch[1] : null);
+
+        if (formula) {
+            try {
+                // Clear the element and render with KaTeX
+                texEl.innerHTML = '';
+                katex.render(formula.trim(), texEl as HTMLElement, {
+                    displayMode: isDisplay,
+                    throwOnError: false,
+                    output: 'html'
+                });
+                console.log('[PlutoRenderer] Rendered formula:', formula.slice(0, 50));
+            } catch (e) {
+                console.warn('[PlutoRenderer] KaTeX error for formula:', formula, e);
+            }
+        }
+    });
+
+    // Also process text nodes directly for cases where .tex class is not used
+    // (fallback for raw $...$ in text)
+    processTextNodesForMath(element);
+}
+
+/**
+ * Process text nodes directly for math expressions (fallback)
+ */
+function processTextNodesForMath(element: HTMLElement): void {
+    const walker = document.createTreeWalker(
+        element,
+        NodeFilter.SHOW_TEXT,
+        null
+    );
+
+    const nodesToProcess: { node: Text; parent: Node }[] = [];
+
+    while (walker.nextNode()) {
+        const textNode = walker.currentNode as Text;
+        const text = textNode.textContent || '';
+
+        // Skip if already inside a KaTeX rendered element
+        if (textNode.parentElement?.closest('.katex')) {
+            continue;
+        }
+
+        // Check if text contains math delimiters
+        if (text.includes('$')) {
+            const parent = textNode.parentNode;
+            if (parent) {
+                nodesToProcess.push({ node: textNode, parent });
+            }
+        }
+    }
+
+    // Process collected nodes (reverse order to maintain positions)
+    for (const { node, parent } of nodesToProcess.reverse()) {
+        const text = node.textContent || '';
+        const fragment = processTextWithMath(text);
+        if (fragment) {
+            parent.replaceChild(fragment, node);
+        }
+    }
+}
+
+/**
+ * Process text containing math expressions and return a document fragment
+ */
+function processTextWithMath(text: string): DocumentFragment | null {
+    const fragment = document.createDocumentFragment();
+    let hasChanges = false;
+    let lastIndex = 0;
+
+    // Pattern for display math ($$...$$) and inline math ($...$)
+    // Display math first to avoid matching $$ as two inline $
+    const mathPattern = /\$\$([^$]+)\$\$|\$([^$\n]+)\$/g;
+    let match;
+
+    while ((match = mathPattern.exec(text)) !== null) {
+        hasChanges = true;
+
+        // Add text before the match
+        if (match.index > lastIndex) {
+            fragment.appendChild(document.createTextNode(text.slice(lastIndex, match.index)));
+        }
+
+        const isDisplay = match[1] !== undefined;
+        const mathContent = isDisplay ? match[1] : match[2];
+
+        try {
+            const span = document.createElement('span');
+            span.className = isDisplay ? 'math-display' : 'math-inline';
+
+            katex.render(mathContent.trim(), span, {
+                displayMode: isDisplay,
+                throwOnError: false,
+                output: 'html'
+            });
+
+            fragment.appendChild(span);
+        } catch (e) {
+            // If KaTeX fails, keep original text
+            console.warn('[PlutoRenderer] KaTeX error:', e);
+            fragment.appendChild(document.createTextNode(match[0]));
+        }
+
+        lastIndex = match.index + match[0].length;
+    }
+
+    // Add remaining text
+    if (lastIndex < text.length) {
+        fragment.appendChild(document.createTextNode(text.slice(lastIndex)));
+    }
+
+    return hasChanges ? fragment : null;
+}
+
 /**
  * Activate the renderer
  */
@@ -25,12 +241,24 @@ export function activate(context: RendererContext<void>) {
         renderOutputItem(outputItem: OutputItem, element: HTMLElement) {
             const html = outputItem.text();
 
+            // Debug log
+            console.log('[PlutoRenderer] Rendering HTML output:', html.slice(0, 500));
+
+            // Add KaTeX styles if not already added
+            addKaTeXStyles();
+
             // Create a container for the HTML
             const container = document.createElement('div');
             container.className = 'pluto-output';
 
             // Parse and render the HTML
             container.innerHTML = html;
+
+            // Debug: log text content before math rendering
+            console.log('[PlutoRenderer] Text content before KaTeX:', container.textContent?.slice(0, 300));
+
+            // Render math expressions using KaTeX
+            renderMathInElement(container);
 
             // Find and setup interactive elements
             setupInteractiveElements(container, context);

@@ -575,13 +575,11 @@ class PlutoKernel {
                 }
                 // If objectid only, don't add output - wait for real data
             } else if (mime === 'text/html') {
-                // Render HTML - use custom MIME type for Pluto HTML with bonds
-                // This triggers our custom renderer which handles interactive elements
-                const plutoMime = existingOutput.body.includes('<bond')
-                    ? 'application/vnd.pluto.html+html'
-                    : 'text/html';
+                // Render HTML - always use custom MIME type for Pluto HTML
+                // This triggers our custom renderer which handles interactive elements and math
+                console.log(`[PlutoKernel] Cell ${cellId} HTML output preview: ${existingOutput.body.slice(0, 200)}`);
                 outputs.push(new vscode.NotebookCellOutput([
-                    vscode.NotebookCellOutputItem.text(existingOutput.body, plutoMime)
+                    vscode.NotebookCellOutputItem.text(existingOutput.body, 'application/vnd.pluto.html+html')
                 ]));
             } else if (mime === 'image/svg+xml') {
                 // SVG is text-based, render as SVG (like julia-vscode)
@@ -737,13 +735,11 @@ class PlutoKernel {
                 }
                 // If objectid only, don't add output - wait for real data
             } else if (mime === 'text/html') {
-                // Render HTML - use custom MIME type for Pluto HTML with bonds
-                // This triggers our custom renderer which handles interactive elements
-                const plutoMime = existingOutput.body.includes('<bond')
-                    ? 'application/vnd.pluto.html+html'
-                    : 'text/html';
+                // Render HTML - always use custom MIME type for Pluto HTML
+                // This triggers our custom renderer which handles interactive elements and math
+                console.log(`[PlutoKernel] Cell ${cellId} HTML output (direct) preview: ${existingOutput.body.slice(0, 200)}`);
                 outputs.push(new vscode.NotebookCellOutput([
-                    vscode.NotebookCellOutputItem.text(existingOutput.body, plutoMime)
+                    vscode.NotebookCellOutputItem.text(existingOutput.body, 'application/vnd.pluto.html+html')
                 ]));
             } else if (mime === 'image/svg+xml') {
                 // SVG is text-based, render as SVG
@@ -778,12 +774,10 @@ class PlutoKernel {
                 // For text/plain, check if it's actually HTML content that was mislabeled
                 // (This can happen with md"""...""" cells when mime arrives before body)
                 if (existingOutput.body.trim().startsWith('<')) {
-                    console.log(`[PlutoKernel] Cell ${cellId} output looks like HTML, treating as HTML`);
-                    const plutoMime = existingOutput.body.includes('<bond')
-                        ? 'application/vnd.pluto.html+html'
-                        : 'text/html';
+                    console.log(`[PlutoKernel] Cell ${cellId} output looks like HTML, treating as HTML: ${existingOutput.body.slice(0, 200)}`);
+                    // Always use custom renderer for Pluto HTML to enable math rendering
                     outputs.push(new vscode.NotebookCellOutput([
-                        vscode.NotebookCellOutputItem.text(existingOutput.body, plutoMime)
+                        vscode.NotebookCellOutputItem.text(existingOutput.body, 'application/vnd.pluto.html+html')
                     ]));
                 } else {
                     console.log(`[PlutoKernel] Rendering text/plain output (direct update) for cell ${cellId}, body length: ${existingOutput.body.length}, preview: ${JSON.stringify(existingOutput.body.substring(0, 100))}`);
