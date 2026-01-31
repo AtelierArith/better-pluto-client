@@ -5,7 +5,6 @@
  */
 
 import type { RendererContext, OutputItem } from 'vscode-notebook-renderer';
-import katex from 'katex';
 
 interface PlutoBondMessage {
     type: 'setBond';
@@ -18,234 +17,135 @@ interface PlutoShowMoreMessage {
     objectid: string;
 }
 
-// Flag to track if KaTeX styles have been added
-let katexStylesAdded = false;
+// MathJax is loaded dynamically from CDN
+// We use a simple interface for type safety
+interface MathJaxObject {
+    typeset?: (elements: Element[]) => void;
+    startup?: {
+        defaultReady?: () => void;
+    };
+}
+
+// Helper to access MathJax on window
+function getMathJax(): MathJaxObject | undefined {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return (window as any).MathJax as MathJaxObject | undefined;
+}
+
+// Helper to set MathJax config on window
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function setMathJaxConfig(config: any): void {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (window as any).MathJax = config;
+}
+
+// Flag to track if MathJax has been initialized
+let mathJaxInitialized = false;
+let mathJaxLoadPromise: Promise<void> | null = null;
 
 /**
- * Add KaTeX CSS styles to the document
+ * Setup MathJax 3 configuration and load the script
+ * Based on Pluto.jl's SetupMathJax.js
  */
-function addKaTeXStyles() {
-    if (katexStylesAdded) return;
+function setupMathJax(): Promise<void> {
+    if (mathJaxLoadPromise) {
+        return mathJaxLoadPromise;
+    }
 
-    const style = document.createElement('style');
-    style.textContent = `
-        /* KaTeX styles - minimal inline version */
-        .katex { font: normal 1.21em KaTeX_Main, Times New Roman, serif; line-height: 1.2; text-indent: 0; text-rendering: auto; }
-        .katex * { -ms-high-contrast-adjust: none !important; }
-        .katex .katex-html { display: inline-block; }
-        .katex .katex-mathml { position: absolute; clip: rect(1px, 1px, 1px, 1px); padding: 0; border: 0; height: 1px; width: 1px; overflow: hidden; }
-        .katex .base { position: relative; display: inline-block; }
-        .katex .strut { display: inline-block; }
-        .katex .textbf { font-weight: bold; }
-        .katex .textit { font-style: italic; }
-        .katex .textrm { font-family: KaTeX_Main; }
-        .katex .textsf { font-family: KaTeX_SansSerif; }
-        .katex .texttt { font-family: KaTeX_Typewriter; }
-        .katex .mathnormal { font-family: KaTeX_Math; font-style: italic; }
-        .katex .mathit { font-family: KaTeX_Main; font-style: italic; }
-        .katex .mathrm { font-style: normal; }
-        .katex .mathbf { font-family: KaTeX_Main; font-weight: bold; }
-        .katex .boldsymbol { font-family: KaTeX_Math; font-weight: bold; font-style: italic; }
-        .katex .amsrm { font-family: KaTeX_AMS; }
-        .katex .mathbb, .katex .textbb { font-family: KaTeX_AMS; }
-        .katex .mathcal { font-family: KaTeX_Caligraphic; }
-        .katex .mathfrak, .katex .textfrak { font-family: KaTeX_Fraktur; }
-        .katex .mathtt { font-family: KaTeX_Typewriter; }
-        .katex .mathscr, .katex .textscr { font-family: KaTeX_Script; }
-        .katex .mathsf, .katex .textsf { font-family: KaTeX_SansSerif; }
-        .katex .mord { }
-        .katex .mop { }
-        .katex .mbin { }
-        .katex .mrel { }
-        .katex .mopen { }
-        .katex .mclose { }
-        .katex .mpunct { }
-        .katex .minner { }
-        .katex .msupsub { text-align: left; }
-        .katex .mfrac > span > span { text-align: center; }
-        .katex .mfrac .frac-line { display: inline-block; width: 100%; border-bottom-style: solid; }
-        .katex .sqrt > .root { margin-left: 0.27777778em; margin-right: -0.55555556em; }
-        .katex .sizing, .katex .fontsize-ensurer { display: inline-block; }
-        .katex .delimsizing { }
-        .katex .nulldelimiter { display: inline-block; width: 0.12em; }
-        .katex .op-symbol { position: relative; }
-        .katex .op-limits > .vlist-t { text-align: center; }
-        .katex .accent > .vlist-t { text-align: center; }
-        .katex .vlist-t { display: inline-table; table-layout: fixed; }
-        .katex .vlist-r { display: table-row; }
-        .katex .vlist { display: table-cell; vertical-align: bottom; position: relative; }
-        .katex .vlist > span { display: block; height: 0; position: relative; }
-        .katex .vlist > span > span { display: inline-block; }
-        .katex .vlist > span > .pstrut { overflow: hidden; width: 0; }
-        .katex .vlist-s { display: table-cell; vertical-align: bottom; font-size: 1px; width: 0; }
-        .katex-display { display: block; margin: 1em 0; text-align: center; }
-        .katex-display > .katex { display: block; text-align: center; white-space: nowrap; }
-        .katex-display > .katex > .katex-html { display: block; position: relative; }
-        .katex-display > .katex > .katex-html > .tag { position: absolute; right: 0; }
+    mathJaxLoadPromise = new Promise((resolve) => {
+        if (mathJaxInitialized && getMathJax()?.typeset) {
+            resolve();
+            return;
+        }
 
-        /* Display math block styling */
-        .math-display {
-            display: block;
-            margin: 1em 0;
-            text-align: center;
-        }
-        .math-inline {
-            display: inline;
-        }
-    `;
-    document.head.appendChild(style);
-    katexStylesAdded = true;
+        // Configure MathJax before loading the script
+        setMathJaxConfig({
+            options: {
+                ignoreHtmlClass: "no-MathJax",
+                processHtmlClass: "tex",  // Process elements with class "tex"
+            },
+            tex: {
+                inlineMath: [
+                    ["$", "$"],
+                    ["\\(", "\\)"],
+                ],
+            },
+            svg: {
+                fontCache: "global",
+            },
+            startup: {
+                ready: () => {
+                    console.log('[PlutoRenderer] MathJax is ready');
+                    getMathJax()?.startup?.defaultReady?.();
+                    mathJaxInitialized = true;
+                    resolve();
+                }
+            }
+        });
+
+        // Load MathJax from CDN
+        const script = document.createElement('script');
+        script.src = 'https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-svg-full.js';
+        script.async = true;
+        script.id = 'MathJax-script';
+
+        script.onerror = () => {
+            console.error('[PlutoRenderer] Failed to load MathJax');
+            resolve(); // Resolve anyway to not block rendering
+        };
+
+        document.head.appendChild(script);
+    });
+
+    return mathJaxLoadPromise;
 }
 
 /**
- * Render math expressions in an element using KaTeX
+ * Render math expressions in an element using MathJax
  *
  * Pluto.jl wraps LaTeX in elements with class "tex":
  * - Inline: <span class="tex">$formula$</span>
  * - Block: <p class="tex">$$formula$$</p>
  */
-function renderMathInElement(element: HTMLElement): void {
+async function renderMathInElement(element: HTMLElement): Promise<void> {
     // Find all elements with class "tex" (Pluto.jl's convention)
     const texElements = element.querySelectorAll('.tex');
     console.log('[PlutoRenderer] Found .tex elements:', texElements.length);
 
-    texElements.forEach((texEl) => {
-        const text = texEl.textContent || '';
-        console.log('[PlutoRenderer] Processing .tex element:', text.slice(0, 100));
-
-        // Check for display math ($$...$$) or inline math ($...$)
-        const displayMatch = text.match(/^\$\$([\s\S]*)\$\$$/);
-        const inlineMatch = text.match(/^\$([\s\S]*)\$$/);
-
-        const isDisplay = displayMatch !== null;
-        const formula = isDisplay ? displayMatch[1] : (inlineMatch ? inlineMatch[1] : null);
-
-        if (formula) {
-            try {
-                // Clear the element and render with KaTeX
-                texEl.innerHTML = '';
-                katex.render(formula.trim(), texEl as HTMLElement, {
-                    displayMode: isDisplay,
-                    throwOnError: false,
-                    output: 'html'
-                });
-                console.log('[PlutoRenderer] Rendered formula:', formula.slice(0, 50));
-            } catch (e) {
-                console.warn('[PlutoRenderer] KaTeX error for formula:', formula, e);
-            }
-        }
-    });
-
-    // Also process text nodes directly for cases where .tex class is not used
-    // (fallback for raw $...$ in text)
-    processTextNodesForMath(element);
-}
-
-/**
- * Process text nodes directly for math expressions (fallback)
- */
-function processTextNodesForMath(element: HTMLElement): void {
-    const walker = document.createTreeWalker(
-        element,
-        NodeFilter.SHOW_TEXT,
-        null
-    );
-
-    const nodesToProcess: { node: Text; parent: Node }[] = [];
-
-    while (walker.nextNode()) {
-        const textNode = walker.currentNode as Text;
-        const text = textNode.textContent || '';
-
-        // Skip if already inside a KaTeX rendered element
-        if (textNode.parentElement?.closest('.katex')) {
-            continue;
-        }
-
-        // Check if text contains math delimiters
-        if (text.includes('$')) {
-            const parent = textNode.parentNode;
-            if (parent) {
-                nodesToProcess.push({ node: textNode, parent });
-            }
-        }
+    if (texElements.length === 0) {
+        return;
     }
 
-    // Process collected nodes (reverse order to maintain positions)
-    for (const { node, parent } of nodesToProcess.reverse()) {
-        const text = node.textContent || '';
-        const fragment = processTextWithMath(text);
-        if (fragment) {
-            parent.replaceChild(fragment, node);
-        }
-    }
-}
+    // Ensure MathJax is loaded
+    await setupMathJax();
 
-/**
- * Process text containing math expressions and return a document fragment
- */
-function processTextWithMath(text: string): DocumentFragment | null {
-    const fragment = document.createDocumentFragment();
-    let hasChanges = false;
-    let lastIndex = 0;
-
-    // Pattern for display math ($$...$$) and inline math ($...$)
-    // Display math first to avoid matching $$ as two inline $
-    const mathPattern = /\$\$([^$]+)\$\$|\$([^$\n]+)\$/g;
-    let match;
-
-    while ((match = mathPattern.exec(text)) !== null) {
-        hasChanges = true;
-
-        // Add text before the match
-        if (match.index > lastIndex) {
-            fragment.appendChild(document.createTextNode(text.slice(lastIndex, match.index)));
-        }
-
-        const isDisplay = match[1] !== undefined;
-        const mathContent = isDisplay ? match[1] : match[2];
-
+    // Use MathJax to typeset the elements
+    const mj = getMathJax();
+    if (mj?.typeset) {
         try {
-            const span = document.createElement('span');
-            span.className = isDisplay ? 'math-display' : 'math-inline';
-
-            katex.render(mathContent.trim(), span, {
-                displayMode: isDisplay,
-                throwOnError: false,
-                output: 'html'
-            });
-
-            fragment.appendChild(span);
-        } catch (e) {
-            // If KaTeX fails, keep original text
-            console.warn('[PlutoRenderer] KaTeX error:', e);
-            fragment.appendChild(document.createTextNode(match[0]));
+            mj.typeset(Array.from(texElements));
+            console.log('[PlutoRenderer] MathJax typeset complete');
+        } catch (err) {
+            console.warn('[PlutoRenderer] Failed to typeset TeX:', err);
         }
-
-        lastIndex = match.index + match[0].length;
+    } else {
+        console.warn('[PlutoRenderer] MathJax not available');
     }
-
-    // Add remaining text
-    if (lastIndex < text.length) {
-        fragment.appendChild(document.createTextNode(text.slice(lastIndex)));
-    }
-
-    return hasChanges ? fragment : null;
 }
 
 /**
  * Activate the renderer
  */
 export function activate(context: RendererContext<void>) {
+    // Start loading MathJax early
+    setupMathJax();
+
     return {
         renderOutputItem(outputItem: OutputItem, element: HTMLElement) {
             const html = outputItem.text();
 
             // Debug log
             console.log('[PlutoRenderer] Rendering HTML output:', html.slice(0, 500));
-
-            // Add KaTeX styles if not already added
-            addKaTeXStyles();
 
             // Create a container for the HTML
             const container = document.createElement('div');
@@ -254,18 +154,17 @@ export function activate(context: RendererContext<void>) {
             // Parse and render the HTML
             container.innerHTML = html;
 
-            // Debug: log text content before math rendering
-            console.log('[PlutoRenderer] Text content before KaTeX:', container.textContent?.slice(0, 300));
-
-            // Render math expressions using KaTeX
-            renderMathInElement(container);
-
             // Find and setup interactive elements
             setupInteractiveElements(container, context);
 
             // Clear previous content and add new
             element.innerHTML = '';
             element.appendChild(container);
+
+            // Render math expressions using MathJax (async)
+            renderMathInElement(container).catch(err => {
+                console.warn('[PlutoRenderer] Math rendering error:', err);
+            });
         }
     };
 }
