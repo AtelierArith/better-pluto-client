@@ -23,6 +23,19 @@ const CELL_ORDER_START = /^# ╔═╡ Cell order:$/;
 const CELL_ORDER_ITEM = /^# ([╠╟])[═─]([0-9a-f-]+)$/;
 const VERSION_PATTERN = /^# v(\d+\.\d+\.\d+)$/;
 
+// Pluto.jl internal cell IDs for package management (should be filtered out)
+const PLUTO_INTERNAL_CELL_IDS = new Set([
+    '00000000-0000-0000-0000-000000000001',  // PLUTO_PROJECT_TOML_CONTENTS
+    '00000000-0000-0000-0000-000000000002',  // PLUTO_MANIFEST_TOML_CONTENTS
+]);
+
+/**
+ * Check if a cell ID is a Pluto.jl internal cell (package management)
+ */
+export function isPlutoInternalCell(cellId: string): boolean {
+    return PLUTO_INTERNAL_CELL_IDS.has(cellId);
+}
+
 /**
  * Parse a Pluto.jl notebook file
  */
@@ -55,8 +68,8 @@ export function parse(content: string): PlutoNotebook {
 
         // Cell order section
         if (CELL_ORDER_START.test(line)) {
-            // Save current cell if any
-            if (currentCellId) {
+            // Save current cell if any (skip internal cells)
+            if (currentCellId && !isPlutoInternalCell(currentCellId)) {
                 const cellCode = currentCellLines.join('\n').trim();
                 const cellKind = detectCellKind(cellCode);
                 // Keep md"""...""" syntax as-is (don't extract content)
@@ -76,6 +89,10 @@ export function parse(content: string): PlutoNotebook {
             if (orderMatch) {
                 const delimiter = orderMatch[1];  // ╠ or ╟
                 const cellId = orderMatch[2];
+                // Skip Pluto.jl internal cells (package management)
+                if (isPlutoInternalCell(cellId)) {
+                    continue;
+                }
                 cellOrder.push(cellId);
                 // ╟─ means folded (hidden code)
                 if (delimiter === '╟') {
@@ -88,8 +105,8 @@ export function parse(content: string): PlutoNotebook {
         // Cell marker
         const cellMatch = line.match(CELL_MARKER);
         if (cellMatch) {
-            // Save previous cell
-            if (currentCellId) {
+            // Save previous cell (skip internal cells)
+            if (currentCellId && !isPlutoInternalCell(currentCellId)) {
                 const cellCode = currentCellLines.join('\n').trim();
                 const cellKind = detectCellKind(cellCode);
                 // Keep md"""...""" syntax as-is (don't extract content)
@@ -116,8 +133,8 @@ export function parse(content: string): PlutoNotebook {
         }
     }
 
-    // Save last cell if not in cell order
-    if (currentCellId && !inCellOrder) {
+    // Save last cell if not in cell order (skip internal cells)
+    if (currentCellId && !inCellOrder && !isPlutoInternalCell(currentCellId)) {
         const cellCode = currentCellLines.join('\n').trim();
         const cellKind = detectCellKind(cellCode);
         // Keep md"""...""" syntax as-is (don't extract content)
