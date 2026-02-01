@@ -1,8 +1,10 @@
 .vscode/**
 .vscode-test/**
 out/**
-node_modules/**
 src/**
+# Include only required node_modules (ws is external in webpack)
+node_modules/**
+!node_modules/ws/**
 vscode-jupyter/**
 Pluto.jl/**
 PlutoUI.jl/**
