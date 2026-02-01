@@ -334,9 +334,32 @@ export class PlutoServer extends EventEmitter {
                 // Track cell order from initial state
                 if (fullState?.cell_order && Array.isArray(fullState.cell_order)) {
                     this.cellOrder = fullState.cell_order as string[];
-                    this.knownCellIds = new Set(this.cellOrder);
+                    if (fullState?.cell_inputs && typeof fullState.cell_inputs === 'object') {
+                        this.knownCellIds = new Set(Object.keys(fullState.cell_inputs as Record<string, unknown>));
+                    } else {
+                        this.knownCellIds = new Set(this.cellOrder);
+                    }
                     console.log(`[BetterPlutoServer] Initial cell order: ${this.cellOrder.length} cells`);
                 }
+                continue;
+            }
+
+            // Track cell_inputs add/remove to keep knownCellIds in sync
+            if (path[0] === 'cell_inputs') {
+                const cellId = path[1] as string;
+                if (cellId) {
+                    if (patch.op === 'remove') {
+                        this.knownCellIds.delete(cellId);
+                    } else if (patch.op === 'add' || patch.op === 'replace') {
+                        this.knownCellIds.add(cellId);
+                    }
+                }
+                continue;
+            }
+
+            // Track cell order changes (no-op for execution, but keep local order in sync)
+            if (path[0] === 'cell_order' && patch.op === 'replace' && Array.isArray(patch.value)) {
+                this.cellOrder = patch.value as string[];
                 continue;
             }
 
@@ -484,6 +507,15 @@ export class PlutoServer extends EventEmitter {
      */
     private extractLogs(logsArray: unknown[]): LogEntry[] {
         if (!Array.isArray(logsArray)) {
+            if (logsArray && typeof logsArray === 'object') {
+                const values = Object.values(logsArray as Record<string, unknown>);
+                console.log(`[BetterPlutoServer] Extracting ${values.length} logs from object`);
+                const result = values.map(log => {
+                    return this.extractSingleLog(log as Record<string, unknown>);
+                }).filter((log): log is LogEntry => log !== null);
+                console.log(`[BetterPlutoServer] Extracted logs:`, result);
+                return result;
+            }
             log(`[BetterPlutoServer] logs is not an array: ${typeof logsArray}`);
             return [];
         }
@@ -953,6 +985,21 @@ export class PlutoServer extends EventEmitter {
         if (!this.knownCellIds.has(cellId)) {
             log(`[BetterPlutoServer] updateCell missing cell_inputs for ${cellId}, sending add`);
             this.knownCellIds.add(cellId);
+            const hasInOrder = this.cellOrder.includes(cellId);
+            const nextOrder = hasInOrder ? this.cellOrder : [...this.cellOrder, cellId];
+            if (!hasInOrder) {
+                this.cellOrder = nextOrder;
+            }
+            // First ensure cell_order includes the new cell
+            this.sendMessage('update_notebook', {
+                updates: [{
+                    path: ['cell_order'],
+                    op: 'replace',
+                    value: nextOrder,
+                }],
+            });
+            // Then add cell_inputs after cell_order is applied
+            await new Promise(resolve => setTimeout(resolve, 50));
             this.sendMessage('update_notebook', {
                 updates: [{
                     path: ['cell_inputs', cellId],
