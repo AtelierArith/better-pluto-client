@@ -28,7 +28,7 @@ class PlutoKernel {
     private server: PlutoServer;
     private _isRunning = false;
     private cellExecutions = new Map<string, vscode.NotebookCellExecution>();
-    private cellOutputs = new Map<string, { body?: string; mime?: string; logs?: LogEntry[] }>();
+    private cellOutputs = new Map<string, { body?: string; mime?: string; logs?: LogEntry[]; lastCode?: string }>();
     private pendingDirectUpdates = new Map<string, NodeJS.Timeout>();  // Debounced direct updates
     private lastStateUpdateAt = new Map<string, number>();  // Track last state update per cell
     private pendingStateSync = new Map<string, NodeJS.Timeout>();  // Missing update fallback
@@ -67,9 +67,32 @@ class PlutoKernel {
             // Sync cells with Pluto
             await this.syncCellsWithPluto();
 
+            // Run all cells after sync to ensure they are executed
+            await this.runAllCellsOnStart();
+
         } catch (err) {
             console.error('[BetterPlutoKernel] Failed to start:', err);
             throw err;
+        }
+    }
+
+    /**
+     * Run all cells after kernel starts (to ensure initial execution)
+     */
+    private async runAllCellsOnStart(): Promise<void> {
+        const cellIds: string[] = [];
+        for (let i = 0; i < this.notebook.cellCount; i++) {
+            const cell = this.notebook.cellAt(i);
+            const cellId = getCellId(cell);
+            if (cellId) {
+                cellIds.push(cellId);
+            }
+        }
+
+        if (cellIds.length > 0) {
+            log(`[BetterPlutoKernel] Running all ${cellIds.length} cells on startup`);
+            // Run all cells at once using run_multiple_cells
+            await this.server.runMultipleCells(cellIds);
         }
     }
 
@@ -273,37 +296,75 @@ class PlutoKernel {
             this.cellExecutions.delete(cellId);
         }
 
-        // Reset cached outputs so stale values don't leak
-        this.cellOutputs.delete(cellId);
+        // Only clear cached outputs if code has actually changed
+        // Pluto may not re-send output for unchanged code (optimization)
+        // If lastCode is not set (cell was executed by Pluto before we tracked it), 
+        // preserve existing output and just update lastCode
+        const cachedOutput = this.cellOutputs.get(cellId);
+        const hasLastCode = cachedOutput && cachedOutput.lastCode !== undefined;
+        const codeChanged = hasLastCode && cachedOutput.lastCode !== code;
+        if (codeChanged) {
+            this.cellOutputs.delete(cellId);
+        } else if (cachedOutput && !hasLastCode) {
+            // Update lastCode for existing output that was set before tracking
+            cachedOutput.lastCode = code;
+        }
 
         // Create execution
         const execution = this.controller.createNotebookCellExecution(cell);
         this.cellExecutions.set(cellId, execution);
 
         execution.start(Date.now());
-        execution.clearOutput();
+        // Only clear output if code actually changed - preserve existing output for re-runs
+        if (codeChanged) {
+            execution.clearOutput();
+            // Initialize cellOutputs with lastCode for tracking
+            this.cellOutputs.set(cellId, { lastCode: code });
+        } else if (!cachedOutput) {
+            // New cell without cached output - initialize with lastCode
+            this.cellOutputs.set(cellId, { lastCode: code });
+        }
 
         // Note: Timeout disabled - Pluto executions can take a long time for compilation
 
         // Update cell code in Pluto and run
+        // plutoId will be the actual ID Pluto knows about (may differ from VS Code cellId)
+        let plutoId = this.server.getPlutoCellId(cellId);
+        
         try {
             if (createdId) {
                 // Make sure the new cell is included in cell_order before updates
                 await this.syncCellOrder();
             }
-            if (!this.knownCellIds.has(cellId)) {
-                log(`[BetterPlutoKernel] Cell ${cellId} not known to Pluto, adding before run`);
-                await this.server.addCellOnly(cellId, code);
-                await this.syncCellOrder();
-                this.knownCellIds.add(cellId);
+            // Use server.isKnownCell to check if Pluto knows about this cell
+            if (!this.server.isKnownCell(cellId)) {
+                log(`[BetterPlutoKernel] Cell ${cellId} not known to Pluto, saving notebook to trigger auto-reload`);
+                
+                // Save the notebook file - this will write the new cell to the file
+                // Pluto's auto_reload_from_file will detect the change and add the cell
+                const notebook = cell.notebook;
+                await notebook.save();
+                log(`[BetterPlutoKernel] Notebook saved, waiting for Pluto to detect new cell`);
+                
+                // Wait for Pluto to recognize the cell (via auto-reload)
+                plutoId = await this.server.waitForCellToAppear(cellId, code);
+                log(`[BetterPlutoKernel] Cell recognized by Pluto with ID: ${plutoId}`);
+                
+                // Transfer tracking to use Pluto's ID if different
+                if (plutoId !== cellId) {
+                    this.cellExecutions.set(plutoId, execution);
+                    this.cellExecutions.delete(cellId);
+                    this.cellOutputs.set(plutoId, this.cellOutputs.get(cellId) || { lastCode: code });
+                    this.cellOutputs.delete(cellId);
+                }
             } else {
-                log(`[BetterPlutoKernel] Sending updateCell for ${cellId}`);
-                await this.server.updateCell(cellId, code);
+                log(`[BetterPlutoKernel] Sending updateCell for ${plutoId}`);
+                await this.server.updateCell(plutoId, code);
             }
-            log(`[BetterPlutoKernel] Sending runCell for ${cellId}`);
-            await this.server.runCell(cellId);
-            log(`[BetterPlutoKernel] runCell completed for ${cellId}`);
-            this.scheduleStateSync(cellId);
+            log(`[BetterPlutoKernel] Sending runCell for ${plutoId}`);
+            await this.server.runCell(plutoId);
+            log(`[BetterPlutoKernel] runCell completed for ${plutoId}`);
+            this.scheduleStateSync(plutoId);
         } catch (err) {
             console.error('[BetterPlutoKernel] Failed to run cell:', err);
             execution.replaceOutput([
@@ -323,10 +384,11 @@ class PlutoKernel {
      * Handle notebook changes (cell added/removed/reordered/modified)
      */
     async handleNotebookChange(e: vscode.NotebookDocumentChangeEvent): Promise<void> {
+        log(`[BetterPlutoKernel] handleNotebookChange: isRunning=${this._isRunning}, contentChanges=${e.contentChanges.length}, cellChanges=${e.cellChanges.length}`);
         if (!this._isRunning) return;
 
         const removedCellIds: string[] = [];
-        const addedCellIds: string[] = [];
+        const addedCells: { cellId: string; code: string; index: number }[] = [];
 
         // Collect removed and added cells
         for (const change of e.contentChanges) {
@@ -349,7 +411,12 @@ class PlutoKernel {
                     await setCellId(cell, cellId);
                 }
 
-                addedCellIds.push(cellId);
+                // Store cell info for later processing (before metadata might be lost)
+                addedCells.push({
+                    cellId,
+                    code: cell.document.getText(),
+                    index: change.range.start + i
+                });
                 this.knownCellIds.add(cellId);
             }
         }
@@ -372,6 +439,8 @@ class PlutoKernel {
             }
         }
 
+        const addedCellIds = addedCells.map(c => c.cellId);
+
         // Detect if this is a move operation (same cells removed and added)
         const isMove = removedCellIds.length > 0 &&
                        addedCellIds.length > 0 &&
@@ -383,28 +452,30 @@ class PlutoKernel {
             log('[BetterPlutoKernel] Cell move detected, updating order');
             await this.syncCellOrder();
         } else {
-            // Handle actual additions and removals
+            // Handle actual removals - delete cells from Pluto
             for (const cellId of removedCellIds) {
                 if (!addedCellIds.includes(cellId)) {
-                    console.log(`[BetterPlutoKernel] Removing cell ${cellId}`);
+                    log(`[BetterPlutoKernel] Removing cell ${cellId}`);
                     await this.server.deleteCellOnly(cellId);
                 }
             }
 
-            for (const change of e.contentChanges) {
-                for (let i = 0; i < change.addedCells.length; i++) {
-                    const cell = change.addedCells[i];
-                    const cellId = getCellId(cell);
-                    if (cellId && !removedCellIds.includes(cellId)) {
-                        const index = change.range.start + i;
-                        console.log(`[BetterPlutoKernel] Adding cell ${cellId} at index ${index}`);
-                        await this.server.addCellOnly(cellId, cell.document.getText());
-                    }
+            // DON'T add new cells to Pluto here!
+            // New cells will be added to Pluto when they are first executed (in executeCell).
+            // This avoids race conditions when Shift+Enter triggers both cell execution
+            // and new cell creation simultaneously.
+            // We just track them locally for now.
+            for (const { cellId } of addedCells) {
+                if (!removedCellIds.includes(cellId)) {
+                    log(`[BetterPlutoKernel] New cell ${cellId} tracked locally (will be added to Pluto on first execution)`);
                 }
             }
 
-            // Always sync the full cell order after structural changes
-            await this.syncCellOrder();
+            // Only sync cell order if we had removals (not additions)
+            // Additions will sync when the cell is executed
+            if (removedCellIds.length > 0) {
+                await this.syncCellOrder();
+            }
         }
     }
 
@@ -442,23 +513,31 @@ class PlutoKernel {
     }
 
     /**
-     * Sync current cell order with Pluto server
+     * Sync current cell order with Pluto server.
+     * Only includes cells that are already known to Pluto (have cell_inputs registered).
+     * New cells should be added via addCellOnly which updates cell_order atomically.
      */
     private async syncCellOrder(): Promise<void> {
-        // Get current cell order from notebook
+        // Get current cell order from notebook, but only include cells known to Pluto
         const currentOrder: string[] = [];
+        const skippedCells: string[] = [];
         for (let i = 0; i < this.notebook.cellCount; i++) {
             const cell = this.notebook.cellAt(i);
             const cellId = getCellId(cell);
             if (cellId) {
-                currentOrder.push(cellId);
-            } else {
-                // Ensure every cell has an ID before syncing order
-                const newId = generateCellId();
-                await setCellId(cell, newId);
-                currentOrder.push(newId);
+                if (this.server.isKnownCell(cellId)) {
+                    // Only include cells that Pluto already knows about
+                    currentOrder.push(cellId);
+                } else {
+                    // Track cells not yet registered with Pluto
+                    skippedCells.push(cellId);
+                }
             }
         }
+        if (skippedCells.length > 0) {
+            log(`[BetterPlutoKernel] syncCellOrder: skipping unknown cells: [${skippedCells.join(', ')}]`);
+        }
+        log(`[BetterPlutoKernel] syncCellOrder: known cells=[${currentOrder.join(', ')}], notebook has ${this.notebook.cellCount} cells`);
 
         const serverOrder = this.server.getCellOrder();
 
@@ -475,8 +554,13 @@ class PlutoKernel {
 
     /**
      * Sync all cells with Pluto server
+     * Only adds cells that Pluto doesn't know about yet.
+     * Cells already known to Pluto (from file) are not updated to avoid clearing their results.
      */
     private async syncCellsWithPluto(): Promise<void> {
+        // Wait a bit for Pluto's initial state to be received via reset_shared_state
+        await new Promise(resolve => setTimeout(resolve, 500));
+        
         for (let i = 0; i < this.notebook.cellCount; i++) {
             const cell = this.notebook.cellAt(i);
 
@@ -487,9 +571,15 @@ class PlutoKernel {
                 await setCellId(cell, cellId);
             }
 
-            // Update cell code in Pluto (md"""...""" cells already have the wrapper)
-            const code = cell.document.getText();
-            await this.server.updateCell(cellId, code);
+            // Only add cells that Pluto doesn't know about yet
+            // Cells already known (from file loading) should not be updated to preserve their results
+            if (!this.server.isKnownCell(cellId)) {
+                log(`[BetterPlutoKernel] Adding new cell ${cellId} to Pluto`);
+                const code = cell.document.getText();
+                await this.server.addCellOnly(cellId, code);
+            } else {
+                log(`[BetterPlutoKernel] Cell ${cellId} already known to Pluto, skipping`);
+            }
         }
     }
 
@@ -538,12 +628,17 @@ class PlutoKernel {
             // For tree+object, don't overwrite existing data with just an objectid
             const isObjectIdOnly = state.output.mime === 'application/vnd.pluto.tree+object' &&
                                    isPlutoObjectId(state.output.body);
+            // Don't overwrite non-empty output with empty output
+            const isEmptyOverwrite = !state.output.body && existingOutput.body;
+            
             if (isObjectIdOnly && existingOutput.body && existingOutput.mime === 'application/vnd.pluto.tree+object') {
-                console.log(`[BetterPlutoKernel] Cell ${cellId} skipping objectid-only update, keeping existing tree data`);
+                log(`[BetterPlutoKernel] Cell ${cellId} skipping objectid-only update, keeping existing tree data`);
+            } else if (isEmptyOverwrite) {
+                log(`[BetterPlutoKernel] Cell ${cellId} skipping empty output update, keeping existing: ${existingOutput.body?.slice(0, 50)}`);
             } else {
                 existingOutput.body = state.output.body;
                 existingOutput.mime = state.output.mime;
-                console.log(`[BetterPlutoKernel] Cell ${cellId} output - mime: ${state.output.mime}, body preview: ${existingOutput.body?.slice(0, 100)}`);
+                log(`[BetterPlutoKernel] Cell ${cellId} output - mime: ${state.output.mime}, body preview: ${existingOutput.body?.slice(0, 100)}`);
             }
         }
 
@@ -720,7 +815,7 @@ class PlutoKernel {
         }
 
         const startedAt = Date.now();
-        const timeout = setTimeout(() => {
+        const timeout = setTimeout(async () => {
             this.pendingStateSync.delete(cellId);
             const execution = this.cellExecutions.get(cellId);
             if (!execution) return;
@@ -730,6 +825,35 @@ class PlutoKernel {
             log(`[BetterPlutoKernel] No state update for ${cellId} after run, requesting full state`);
             try {
                 this.server.requestFullState();
+                
+                // Wait a bit for full state to arrive
+                await new Promise(resolve => setTimeout(resolve, 500));
+                
+                // If execution is still pending and we have cached output, end it
+                // This handles the case where Pluto didn't actually run the cell
+                // (code unchanged, cell already up-to-date)
+                const stillPending = this.cellExecutions.get(cellId);
+                if (stillPending) {
+                    const cachedOutput = this.cellOutputs.get(cellId);
+                    if (cachedOutput && cachedOutput.body) {
+                        log(`[BetterPlutoKernel] Cell ${cellId} has cached output, ending execution (cell was likely already up-to-date)`);
+                        
+                        // Rebuild and show the cached output
+                        const outputs: vscode.NotebookCellOutput[] = [];
+                        const mime = cachedOutput.mime || 'text/plain';
+                        outputs.push(new vscode.NotebookCellOutput([
+                            vscode.NotebookCellOutputItem.text(cachedOutput.body, mime)
+                        ]));
+                        stillPending.replaceOutput(outputs);
+                        stillPending.end(true, Date.now());
+                        this.cellExecutions.delete(cellId);
+                    } else {
+                        // No cached output, just end the execution
+                        log(`[BetterPlutoKernel] Cell ${cellId} has no output, ending execution`);
+                        stillPending.end(true, Date.now());
+                        this.cellExecutions.delete(cellId);
+                    }
+                }
             } catch (err) {
                 console.error('[BetterPlutoKernel] Failed to request full state:', err);
             }
