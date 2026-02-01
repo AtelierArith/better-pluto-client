@@ -230,6 +230,15 @@ export class PlutoServer extends EventEmitter {
     }
 
     /**
+     * Request full notebook state from Pluto
+     */
+    requestFullState(): void {
+        this.sendMessage('reset_shared_state', {
+            notebook_id: this.notebookId,
+        });
+    }
+
+    /**
      * Send message to Pluto server
      */
     private sendMessage(type: string, body: Record<string, unknown> = {}): void {
@@ -276,7 +285,16 @@ export class PlutoServer extends EventEmitter {
             if (type === '👋') {
                 log('[BetterPlutoServer] Got welcome message from Pluto');
             } else if (type === 'notebook_diff') {
+                const content = message.message as Record<string, unknown>;
+                const patches = content?.patches as Array<{
+                    path: (string | number)[];
+                    op: string;
+                    value?: unknown;
+                }>;
+                log(`[BetterPlutoServer] notebook_diff patches=${patches?.length ?? 0}`);
                 this.handleNotebookDiff(message);
+            } else if (type === 'run_feedback') {
+                log(`[BetterPlutoServer] run_feedback: ${JSON.stringify(message).slice(0, 300)}`);
             } else if (type === 'object_result') {
                 this.handleObjectResult(message);
             }
@@ -297,6 +315,12 @@ export class PlutoServer extends EventEmitter {
         }>;
 
         if (!patches) return;
+
+        // Debug: log patch paths (trim to avoid huge output)
+        const patchPreview = patches.slice(0, 8).map((patch) => {
+            return `${patch.op} ${JSON.stringify(patch.path)}`;
+        });
+        log(`[BetterPlutoServer] notebook_diff patch paths: ${patchPreview.join(' | ')}`);
 
         for (const patch of patches) {
             const path = patch.path;
@@ -379,6 +403,7 @@ export class PlutoServer extends EventEmitter {
             console.log(`[BetterPlutoServer] Cell ${cellId} has ${state.logs?.length || 0} logs`);
         }
 
+        log(`[BetterPlutoServer] cellResult ${cellId}: running=${state.running}, errored=${state.errored}, runtime=${state.runtime}, hasOutput=${!!state.output}`);
         console.log(`[BetterPlutoServer] Cell ${cellId} full result:`, JSON.stringify(state).slice(0, 200));
         this.emit('cellState', cellId, state);
     }
@@ -391,17 +416,22 @@ export class PlutoServer extends EventEmitter {
 
         if (field === 'running') {
             state.running = value as boolean;
+            log(`[BetterPlutoServer] cellField ${cellId} running=${state.running}`);
         } else if (field === 'queued') {
             state.queued = value as boolean;
+            log(`[BetterPlutoServer] cellField ${cellId} queued=${state.queued}`);
         } else if (field === 'errored') {
             state.errored = value as boolean;
+            log(`[BetterPlutoServer] cellField ${cellId} errored=${state.errored}`);
         } else if (field === 'runtime') {
             state.runtime = value as number;
+            log(`[BetterPlutoServer] cellField ${cellId} runtime=${state.runtime}`);
         } else if (field === 'output') {
             // Full output object replacement
             state.output = this.extractOutput(value as Record<string, unknown>);
             // Also update tracked state
             this.cellOutputs.set(cellId, state.output);
+            log(`[BetterPlutoServer] cellField ${cellId} output mime=${state.output?.mime}`);
         } else if (field === 'logs') {
             // Handle logs - can be array or single log object (when pushed via JSONPatch)
             if (Array.isArray(value)) {
@@ -668,6 +698,7 @@ export class PlutoServer extends EventEmitter {
      * Run a cell
      */
     async runCell(cellId: string): Promise<void> {
+        console.log(`[BetterPlutoServer] runCell request: ${cellId}`);
         this.sendMessage('run_multiple_cells', {
             cells: [cellId],
         });
@@ -918,6 +949,24 @@ export class PlutoServer extends EventEmitter {
      * Update cell code
      */
     async updateCell(cellId: string, code: string): Promise<void> {
+        log(`[BetterPlutoServer] updateCell request: ${cellId}, length=${code.length}`);
+        if (!this.knownCellIds.has(cellId)) {
+            log(`[BetterPlutoServer] updateCell missing cell_inputs for ${cellId}, sending add`);
+            this.knownCellIds.add(cellId);
+            this.sendMessage('update_notebook', {
+                updates: [{
+                    path: ['cell_inputs', cellId],
+                    op: 'add',
+                    value: {
+                        cell_id: cellId,
+                        code: code,
+                        code_folded: false,
+                    },
+                }],
+            });
+            return;
+        }
+
         this.sendMessage('update_notebook', {
             updates: [{
                 path: ['cell_inputs', cellId, 'code'],
