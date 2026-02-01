@@ -107,7 +107,6 @@ This extension reads and writes standard Pluto.jl notebook files (`.jl`), which 
 ## Known Issues
 
 - First cell execution starts the Pluto kernel (takes ~30-60 seconds on first run)
-- Some Pluto-specific features (like bind widgets) may not render in VS Code outputs
 
 ## License
 
