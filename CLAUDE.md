@@ -30,9 +30,11 @@ Pluto.jl リアクティブノートブックの機能を、ブラウザでは�
 │  │ (Custom Renderer)   │              │                  │
 │  │                     │              │                  │
 │  │ - HTML出力表示      │              │                  │
+│  │ - MathJax数式対応   │              │                  │
 │  │ - インタラクティブ  │              │                  │
 │  │   ウィジェット対応  │◀─────────────┘                  │
-│  └─────────────────────┘    (bond updates)              │
+│  │ - Plotly/JS実行     │    (bond updates)              │
+│  └─────────────────────┘                                │
 └─────────────────────────────────────────────────────────┘
                              │
                              ▼ WebSocket (MessagePack)
@@ -45,26 +47,6 @@ Pluto.jl リアクティブノートブックの機能を、ブラウザでは�
 └─────────────────────────────────────────────────────────┘
 ```
 
-## Pluto.jl サーバーとの接続方法
-
-### オプション 1: Pluto.run() で起動してWebSocket接続
-
-```julia
-# Julia側
-import Pluto
-Pluto.run(launch_browser=false, port=1234)
-```
-
-Pluto.jl は WebSocket で以下のメッセージを送受信:
-- セル追加/削除/更新
-- セル実行リクエスト
-- 実行結果の受信
-- ノートブック状態の同期
-
-### オプション 2: PlutoSliderServer 的なアプローチ
-
-静的な HTML エクスポートではなく、リアルタイム接続を維持
-
 ## 実装タスク
 
 ### Phase 1: Pluto.jl サーバー接続 ✅
@@ -75,21 +57,37 @@ Pluto.jl は WebSocket で以下のメッセージを送受信:
 - [ ] エラーハンドリング改善
 - [ ] 接続状態の UI 表示
 
-### Phase 2: UI 連携 🚧
+### Phase 2: UI 連携 ✅
 - [x] セル実行結果の表示（Pluto形式）
 - [x] エラー表示（Pluto.jl フォーマット）
 - [x] リアクティブ更新の反映
 - [x] 実行中状態の表示
-- [x] インタラクティブウィジェット対応（PlutoUI: Slider, Select, Checkbox 等）
+- [x] インタラクティブウィジェット対応（PlutoUI: Slider, Select, Checkbox, Clock 等）
 - [x] Pluto.jl 同一のツリー出力表示（折りたたみ可能）
 - [x] 画像出力（PNG, SVG）
-- [ ] プロットライブラリ対応（Plots.jl 等）
+- [x] MathJax 3 による数式レンダリング
+- [x] セル折りたたみ（code_folded）対応
+- [x] Plotly/JS ベースのビジュアライゼーション（スクリプト実行対応）
+- [x] 専用出力チャンネル（"BetterPlutoClient"）
 
 ### Phase 3: 完全な機能
 - [ ] パッケージ管理 UI
 - [ ] 変数エクスプローラー
 - [ ] ドキュメント表示
 - [ ] セル依存関係グラフ表示
+- [ ] プロットライブラリ完全対応（Plots.jl 等）
+
+## 拡張機能コマンド・キーバインド
+
+| コマンド | タイトル | キーバインド | アイコン |
+|---------|--------|------------|---------|
+| `pluto-notebook.openAsPlutoNotebook` | Open as Pluto Notebook | - | - |
+| `pluto-notebook.startKernel` | Start Pluto Kernel | - | `$(play)` |
+| `pluto-notebook.stopKernel` | Stop Pluto Kernel | - | `$(stop)` |
+| `pluto-notebook.restartKernel` | Restart Pluto Kernel | - | `$(refresh)` |
+| `pluto-notebook.wrapInBeginEnd` | Wrap Cell in begin...end | `Cmd+Shift+B` | `$(code)` |
+| `pluto-notebook.saveAndExecute` | Save and Execute Modified Cells | `Cmd+S` | - |
+| `pluto-notebook.toggleCellFolded` | Toggle Cell Code Visibility | - | `$(eye)` |
 
 ## Pluto.jl WebSocket プロトコル
 
@@ -189,6 +187,7 @@ interface NotebookState {
 - `Pluto.jl/src/webserver/Session.jl` - セッション管理
 - `Pluto.jl/src/webserver/PutUpdates.jl` - 状態更新・差分送信
 - `Pluto.jl/frontend/common/PlutoConnection.js` - クライアント実装参考
+- `docs/PLUTO_SERVER_PROCESSING.md` - サーバーメッセージ処理の詳細解析
 
 ## 開発コマンド
 
@@ -202,8 +201,14 @@ yarn compile
 # 開発モード（ウォッチ）
 yarn watch
 
-# パッケージ
+# パッケージ（プロダクションビルド）
 yarn package
+
+# リント
+yarn lint
+
+# テスト
+yarn test
 
 # Pluto接続テスト（スタンドアロン）
 node test-pluto-connection.js
@@ -271,28 +276,43 @@ VSIX を作らずに素早くテストする場合：
 #### 対応している機能
 
 - **リアクティブ実行**: セル間の依存関係を自動解析し、変更時に関連セルを再実行
-- **インタラクティブウィジェット**: `@bind` マクロで PlutoUI の Slider, Select, Checkbox 等を使用可能
+- **インタラクティブウィジェット**: `@bind` マクロで PlutoUI の Slider, Select, Checkbox, Clock 等を使用可能
 - **ツリー出力**: 配列やオブジェクトを Pluto.jl と同一の折りたたみ可能な形式で表示
 - **画像出力**: PNG, JPEG, SVG をサポート
+- **数式レンダリング**: MathJax 3 による LaTeX 数式表示
+- **セル折りたたみ**: Pluto.jl の code_folded 属性に対応（`╟─` マーカー）
+- **JS ビジュアライゼーション**: Plotly 等の JavaScript ベースのプロット表示
 - **エラー表示**: Pluto.jl のスタックトレースを表示
+- **出力チャンネル**: "BetterPlutoClient" チャンネルでサーバーログを確認可能
+
+## ワークスペース設定
+
+- `editor.formatOnSave`: `false`（Pluto ノートブックのフォーマット崩れ防止）
 
 ## ファイル構成
 
 ```
 src/
-├── extension.ts               # エントリーポイント、レンダラーメッセージング
+├── extension.ts               # エントリーポイント、出力チャンネル管理、レンダラーメッセージング
 ├── PlutoNotebookController.ts # ノートブックコントローラー（セル実行、出力レンダリング）
 ├── PlutoNotebookSerializer.ts # ノートブックシリアライザー（ファイル読み書き）
 ├── PlutoNotebookParser.ts     # .jl ファイルパーサー（Pluto形式解析）
 ├── PlutoServer.ts             # Pluto.jl サーバー管理、WebSocket通信
-└── pluto-renderer.ts          # カスタムレンダラー（インタラクティブHTML対応）
+├── pluto-renderer.ts          # カスタムレンダラー（HTML出力、MathJax、JS実行）
+└── test/
+    └── extension.test.ts      # テストスイート（プレースホルダー）
 
-tsconfig.json                  # メイン TypeScript 設定
-tsconfig.renderer.json         # レンダラー用 TypeScript 設定（DOM types）
-webpack.config.js              # Webpack 設定（extension + renderer）
+tsconfig.json                  # メイン TypeScript 設定（Node16, ES2022）
+tsconfig.renderer.json         # レンダラー用 TypeScript 設定（ES2020 + DOM）
+webpack.config.js              # Webpack 設定（extension + renderer の2エントリ）
+eslint.config.mjs              # ESLint 設定
 
 samples/
-└── Basic.jl                   # サンプルノートブック
+├── Basic.jl                   # 基本サンプル（変数代入、算術）
+└── Example.jl                 # 応用サンプル（Plots, PlutoUI, 画像表示）
+
+docs/
+└── PLUTO_SERVER_PROCESSING.md # Pluto.jl サーバーメッセージ処理の詳細解析
 
 pluto-webview/
 └── pluto-loader.html          # Webview ローダー（未使用）
@@ -302,7 +322,16 @@ pluto-webview/
 
 | ファイル | 役割 |
 |---------|------|
-| `PlutoNotebookController.ts` | VS Code Notebook API との統合、セル実行管理、出力変換 |
+| `PlutoNotebookController.ts` | VS Code Notebook API との統合、セル実行管理、出力変換、セル折りたたみ |
 | `PlutoServer.ts` | Pluto.jl プロセスの起動・管理、WebSocket通信、MessagePack encode/decode |
-| `pluto-renderer.ts` | HTML出力のレンダリング、`@bind` ウィジェットのイベントキャプチャ |
-| `extension.ts` | 拡張機能の初期化、レンダラーメッセージングのセットアップ |
+| `pluto-renderer.ts` | HTML出力のレンダリング、MathJax 数式、`@bind` ウィジェット、Plotly/JS 実行 |
+| `PlutoNotebookSerializer.ts` | `.jl` ファイルの読み書き、セルメタデータ管理 |
+| `PlutoNotebookParser.ts` | Pluto.jl 形式の `.jl` ファイル解析、セル抽出 |
+| `extension.ts` | 拡張機能の初期化、出力チャンネル、レンダラーメッセージング |
+
+### 依存パッケージ
+
+| パッケージ | 用途 |
+|-----------|------|
+| `@msgpack/msgpack` | Pluto.jl WebSocket メッセージのシリアライゼーション |
+| `ws` | WebSocket クライアント |
