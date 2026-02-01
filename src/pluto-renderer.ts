@@ -181,12 +181,57 @@ export function activate(context: RendererContext<void>) {
             element.innerHTML = '';
             element.appendChild(container);
 
+            // Execute any scripts in the HTML (needed for Plotly, etc.)
+            executeScripts(container).catch(err => {
+                console.warn('[PlutoRenderer] Script execution error:', err);
+            });
+
             // Render math expressions using MathJax (async)
             renderMathInElement(container).catch(err => {
                 console.warn('[PlutoRenderer] Math rendering error:', err);
             });
         }
     };
+}
+
+/**
+ * Execute scripts in the HTML content
+ * innerHTML doesn't execute scripts, so we need to do it manually
+ * This is needed for Plotly, and other JavaScript-based visualizations
+ */
+async function executeScripts(container: HTMLElement): Promise<void> {
+    const scripts = container.querySelectorAll('script');
+    console.log(`[PlutoRenderer] Found ${scripts.length} scripts to execute`);
+
+    for (const oldScript of Array.from(scripts)) {
+        const newScript = document.createElement('script');
+
+        // Copy attributes
+        for (const attr of Array.from(oldScript.attributes)) {
+            newScript.setAttribute(attr.name, attr.value);
+        }
+
+        if (oldScript.src) {
+            // External script - load it
+            console.log(`[PlutoRenderer] Loading external script: ${oldScript.src}`);
+            await new Promise<void>((resolve, reject) => {
+                newScript.onload = () => {
+                    console.log(`[PlutoRenderer] External script loaded: ${oldScript.src}`);
+                    resolve();
+                };
+                newScript.onerror = (e) => {
+                    console.error(`[PlutoRenderer] Failed to load script: ${oldScript.src}`, e);
+                    reject(e);
+                };
+                oldScript.parentNode?.replaceChild(newScript, oldScript);
+            });
+        } else {
+            // Inline script - copy content and execute
+            newScript.textContent = oldScript.textContent;
+            oldScript.parentNode?.replaceChild(newScript, oldScript);
+            console.log(`[PlutoRenderer] Executed inline script (${oldScript.textContent?.length || 0} chars)`);
+        }
+    }
 }
 
 /**
