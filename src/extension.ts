@@ -44,6 +44,16 @@ export function activate(context: vscode.ExtensionContext) {
     // Setup renderer messaging for interactive widgets (Slider, etc.)
     setupRendererMessaging(context);
 
+    // Track which notebooks have had folded states applied (only apply once per kernel start)
+    const foldedNotebooks = new Set<string>();
+
+    // Clean up when notebook is closed
+    context.subscriptions.push(
+        vscode.workspace.onDidCloseNotebookDocument((notebook) => {
+            foldedNotebooks.delete(notebook.uri.toString());
+        })
+    );
+
     // Register commands
     context.subscriptions.push(
         vscode.commands.registerCommand('pluto-notebook.openAsPlutoNotebook', async (uri?: vscode.Uri) => {
@@ -73,6 +83,16 @@ export function activate(context: vscode.ExtensionContext) {
                 }, async () => {
                     await controller!.startKernel(notebook);
                 });
+
+                // Apply folded states after kernel starts (security: show all cells first, then fold)
+                // This matches Pluto.jl's behavior where folded cells are collapsed after trust is established
+                const notebookKey = notebook.uri.toString();
+                if (!foldedNotebooks.has(notebookKey)) {
+                    foldedNotebooks.add(notebookKey);
+                    console.log('[PlutoExtension] Kernel started, applying folded states...');
+                    await new Promise(resolve => setTimeout(resolve, 100));
+                    await applyFoldedStates(notebook);
+                }
             }
         })
     );
@@ -280,6 +300,49 @@ function setupRendererMessaging(context: vscode.ExtensionContext) {
 
     context.subscriptions.push(disposable);
     console.log('[PlutoExtension] Renderer messaging setup complete');
+}
+
+/**
+ * Apply folded states to notebook cells after opening
+ * VS Code doesn't automatically apply inputCollapsed from NotebookData metadata,
+ * so we need to use the VS Code command to collapse cells.
+ */
+async function applyFoldedStates(notebook: vscode.NotebookDocument): Promise<void> {
+    const notebookEditor = vscode.window.activeNotebookEditor;
+    if (!notebookEditor || notebookEditor.notebook !== notebook) {
+        console.log('[PlutoExtension] No active notebook editor for this notebook');
+        return;
+    }
+
+    // Find cells that should be folded
+    const cellsToFold: number[] = [];
+    for (const cell of notebook.getCells()) {
+        const customMetadata = cell.metadata?.custom as { folded?: boolean } | undefined;
+        const shouldBeFolded = customMetadata?.folded ?? false;
+
+        if (shouldBeFolded) {
+            cellsToFold.push(cell.index);
+        }
+    }
+
+    console.log(`[PlutoExtension] Cells to fold: ${cellsToFold.length} cells`, cellsToFold.slice(0, 10));
+
+    if (cellsToFold.length === 0) {
+        return;
+    }
+
+    // Select all cells that need to be folded and collapse them at once
+    // VS Code's collapse command works on selected cells
+    const selections = cellsToFold.map(idx => new vscode.NotebookRange(idx, idx + 1));
+    notebookEditor.selections = selections;
+
+    // Execute collapse command
+    await vscode.commands.executeCommand('notebook.cell.collapseCellInput');
+
+    // Clear selection (select first cell)
+    notebookEditor.selections = [new vscode.NotebookRange(0, 1)];
+
+    console.log('[PlutoExtension] Folded states applied using collapse command');
 }
 
 export function deactivate() {
