@@ -225,6 +225,9 @@ class PlutoKernel {
             this.cellExecutions.set(cellId, execution);
             executions.set(cellId, execution);
 
+            // Reset cached outputs so stale values don't leak
+            this.cellOutputs.delete(cellId);
+
             execution.start(Date.now());
             execution.clearOutput();
 
@@ -248,9 +251,11 @@ class PlutoKernel {
     private async executeCell(cell: vscode.NotebookCell): Promise<void> {
         // Ensure cell has an ID
         let cellId = getCellId(cell);
+        let createdId = false;
         if (!cellId) {
             cellId = generateCellId();
             await setCellId(cell, cellId);
+            createdId = true;
         }
 
         // Get cell code (md"""...""" cells already have the wrapper)
@@ -268,6 +273,9 @@ class PlutoKernel {
             this.cellExecutions.delete(cellId);
         }
 
+        // Reset cached outputs so stale values don't leak
+        this.cellOutputs.delete(cellId);
+
         // Create execution
         const execution = this.controller.createNotebookCellExecution(cell);
         this.cellExecutions.set(cellId, execution);
@@ -279,8 +287,19 @@ class PlutoKernel {
 
         // Update cell code in Pluto and run
         try {
-            log(`[BetterPlutoKernel] Sending updateCell for ${cellId}`);
-            await this.server.updateCell(cellId, code);
+            if (createdId) {
+                // Make sure the new cell is included in cell_order before updates
+                await this.syncCellOrder();
+            }
+            if (!this.knownCellIds.has(cellId)) {
+                log(`[BetterPlutoKernel] Cell ${cellId} not known to Pluto, adding before run`);
+                await this.server.addCellOnly(cellId, code);
+                await this.syncCellOrder();
+                this.knownCellIds.add(cellId);
+            } else {
+                log(`[BetterPlutoKernel] Sending updateCell for ${cellId}`);
+                await this.server.updateCell(cellId, code);
+            }
             log(`[BetterPlutoKernel] Sending runCell for ${cellId}`);
             await this.server.runCell(cellId);
             log(`[BetterPlutoKernel] runCell completed for ${cellId}`);
@@ -433,6 +452,11 @@ class PlutoKernel {
             const cellId = getCellId(cell);
             if (cellId) {
                 currentOrder.push(cellId);
+            } else {
+                // Ensure every cell has an ID before syncing order
+                const newId = generateCellId();
+                await setCellId(cell, newId);
+                currentOrder.push(newId);
             }
         }
 
@@ -524,7 +548,10 @@ class PlutoKernel {
         }
 
         if (state.logs) {
-            existingOutput.logs = state.logs;
+            // Avoid wiping existing logs with empty arrays (full state often omits stdout)
+            if (state.logs.length > 0 || !existingOutput.logs || existingOutput.logs.length === 0) {
+                existingOutput.logs = state.logs;
+            }
             console.log(`[BetterPlutoKernel] Cell ${cellId} logs:`, state.logs);
         }
 
@@ -536,7 +563,6 @@ class PlutoKernel {
         // Add logs (stdout) if present
         if (existingOutput.logs && existingOutput.logs.length > 0) {
             const stdoutLogs = existingOutput.logs
-                .filter(log => log.level === 'LogLevel(-555)' || !log.level || log.level === '')
                 .map(log => log.msg)
                 .join('');
 
