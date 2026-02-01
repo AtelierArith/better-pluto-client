@@ -44,13 +44,38 @@ export function activate(context: vscode.ExtensionContext) {
     // Setup renderer messaging for interactive widgets (Slider, etc.)
     setupRendererMessaging(context);
 
-    // Track which notebooks have had folded states applied (only apply once per kernel start)
-    const foldedNotebooks = new Set<string>();
+    // Apply folded state when notebook editor becomes active
+    // Track which notebooks have been processed to avoid re-applying
+    const processedNotebooks = new Set<string>();
+
+    context.subscriptions.push(
+        vscode.window.onDidChangeActiveNotebookEditor(async (editor) => {
+            if (!editor) {
+                return;
+            }
+            const notebook = editor.notebook;
+            if (notebook.notebookType !== NOTEBOOK_TYPE) {
+                return;
+            }
+
+            // Only apply once per notebook
+            const notebookKey = notebook.uri.toString();
+            if (processedNotebooks.has(notebookKey)) {
+                return;
+            }
+            processedNotebooks.add(notebookKey);
+
+            console.log('[PlutoExtension] Notebook editor activated, applying folded states...');
+            // Small delay to ensure the editor is fully ready
+            await new Promise(resolve => setTimeout(resolve, 100));
+            await applyFoldedStates(notebook);
+        })
+    );
 
     // Clean up when notebook is closed
     context.subscriptions.push(
         vscode.workspace.onDidCloseNotebookDocument((notebook) => {
-            foldedNotebooks.delete(notebook.uri.toString());
+            processedNotebooks.delete(notebook.uri.toString());
         })
     );
 
@@ -83,16 +108,6 @@ export function activate(context: vscode.ExtensionContext) {
                 }, async () => {
                     await controller!.startKernel(notebook);
                 });
-
-                // Apply folded states after kernel starts (security: show all cells first, then fold)
-                // This matches Pluto.jl's behavior where folded cells are collapsed after trust is established
-                const notebookKey = notebook.uri.toString();
-                if (!foldedNotebooks.has(notebookKey)) {
-                    foldedNotebooks.add(notebookKey);
-                    console.log('[PlutoExtension] Kernel started, applying folded states...');
-                    await new Promise(resolve => setTimeout(resolve, 100));
-                    await applyFoldedStates(notebook);
-                }
             }
         })
     );
