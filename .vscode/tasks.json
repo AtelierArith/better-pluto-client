@@ -6,7 +6,24 @@
 		{
 			"type": "npm",
 			"script": "watch",
-			"problemMatcher": "$ts-webpack-watch",
+			"problemMatcher": {
+				"owner": "typescript",
+				"fileLocation": "relative",
+				"pattern": {
+					"regexp": "^(.*)\\((\\d+),(\\d+)\\):\\s+(error|warning)\\s+TS(\\d+):\\s+(.*)$",
+					"file": 1,
+					"line": 2,
+					"column": 3,
+					"severity": 4,
+					"code": 5,
+					"message": 6
+				},
+				"background": {
+					"activeOnStart": true,
+					"beginsPattern": "^\\[webpack\\.Progress\\]|^\\s*webpack",
+					"endsPattern": "^\\[webpack-cli\\] watching for file changes\\.\\.\\.|compiled|built"
+				}
+			},
 			"isBackground": true,
 			"presentation": {
 				"reveal": "never",
