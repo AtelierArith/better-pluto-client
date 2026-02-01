@@ -6,6 +6,7 @@ import * as vscode from 'vscode';
 import { PlutoServer, CellState, LogEntry } from './PlutoServer';
 import { getCellId, setCellId } from './PlutoNotebookSerializer';
 import { generateCellId } from './PlutoNotebookParser';
+import { log } from './extension';
 
 const NOTEBOOK_TYPE = 'pluto-notebook';
 
@@ -54,7 +55,7 @@ class PlutoKernel {
     async start(): Promise<void> {
         if (this._isRunning) return;
 
-        console.log('[PlutoKernel] Starting kernel for', this.notebook.uri.fsPath);
+        log(`[BetterPlutoKernel] Starting kernel for ${this.notebook.uri.fsPath}`);
 
         try {
             await this.server.start(this.notebook.uri.fsPath);
@@ -65,7 +66,7 @@ class PlutoKernel {
             await this.syncCellsWithPluto();
 
         } catch (err) {
-            console.error('[PlutoKernel] Failed to start:', err);
+            console.error('[BetterPlutoKernel] Failed to start:', err);
             throw err;
         }
     }
@@ -74,7 +75,7 @@ class PlutoKernel {
      * Stop the Pluto kernel
      */
     async stop(): Promise<void> {
-        console.log('[PlutoKernel] Stopping kernel');
+        log('[BetterPlutoKernel] Stopping kernel');
         this.server.stop();
         this._isRunning = false;
 
@@ -111,7 +112,7 @@ class PlutoKernel {
      * Interrupt all running cells
      */
     async interrupt(): Promise<void> {
-        console.log('[PlutoKernel] Interrupting execution');
+        log('[BetterPlutoKernel] Interrupting execution');
 
         // Send interrupt to Pluto server
         if (this._isRunning) {
@@ -120,7 +121,7 @@ class PlutoKernel {
 
         // End all running executions
         for (const [cellId, execution] of this.cellExecutions) {
-            console.log(`[PlutoKernel] Ending execution for ${cellId} due to interrupt`);
+            console.log(`[BetterPlutoKernel] Ending execution for ${cellId} due to interrupt`);
             try {
                 execution.replaceOutput([
                     new vscode.NotebookCellOutput([
@@ -138,10 +139,10 @@ class PlutoKernel {
      */
     async setBond(name: string, value: unknown): Promise<void> {
         if (!this._isRunning) {
-            console.log('[PlutoKernel] Cannot set bond, kernel not running');
+            log('[BetterPlutoKernel] Cannot set bond, kernel not running');
             return;
         }
-        console.log(`[PlutoKernel] Setting bond ${name} to`, value);
+        console.log(`[BetterPlutoKernel] Setting bond ${name} to`, value);
         await this.server.setBond(name, value);
     }
 
@@ -150,10 +151,10 @@ class PlutoKernel {
      */
     async getPublishedObject(objectid: string): Promise<unknown> {
         if (!this._isRunning) {
-            console.log('[PlutoKernel] Cannot get published object, kernel not running');
+            log('[BetterPlutoKernel] Cannot get published object, kernel not running');
             return null;
         }
-        console.log(`[PlutoKernel] Getting published object: ${objectid}`);
+        console.log(`[BetterPlutoKernel] Getting published object: ${objectid}`);
         return await this.server.getPublishedObject(objectid);
     }
 
@@ -162,10 +163,10 @@ class PlutoKernel {
      */
     async updateCellOrder(newOrder: string[]): Promise<void> {
         if (!this._isRunning) {
-            console.log('[PlutoKernel] Cannot update cell order, kernel not running');
+            log('[BetterPlutoKernel] Cannot update cell order, kernel not running');
             return;
         }
-        console.log(`[PlutoKernel] Updating cell order: ${newOrder.length} cells`);
+        console.log(`[BetterPlutoKernel] Updating cell order: ${newOrder.length} cells`);
         await this.server.updateCellOrder(newOrder);
     }
 
@@ -200,10 +201,10 @@ class PlutoKernel {
         const cellIds: string[] = [];
         const executions: Map<string, vscode.NotebookCellExecution> = new Map();
 
-        console.log(`[PlutoKernel] Batch: preparing ${cells.length} cells for execution`);
+        console.log(`[BetterPlutoKernel] Batch: preparing ${cells.length} cells for execution`);
         // Prepare all cells: ensure IDs, create executions, update code
         for (const cell of cells) {
-            console.log(`[PlutoKernel] Batch: processing cell, content preview: ${cell.document.getText().slice(0, 50)}`);
+            console.log(`[BetterPlutoKernel] Batch: processing cell, content preview: ${cell.document.getText().slice(0, 50)}`);
             let cellId = getCellId(cell);
             if (!cellId) {
                 cellId = generateCellId();
@@ -229,14 +230,14 @@ class PlutoKernel {
 
             // Update cell code in Pluto (md"""...""" cells already have the wrapper)
             const code = cell.document.getText();
-            console.log(`[PlutoKernel] Batch: updating cell ${cellId}`);
+            console.log(`[BetterPlutoKernel] Batch: updating cell ${cellId}`);
             await this.server.updateCell(cellId, code);
         }
 
         // Run all cells at once
-        console.log(`[PlutoKernel] Batch: running ${cellIds.length} cells`);
+        console.log(`[BetterPlutoKernel] Batch: running ${cellIds.length} cells`);
         await this.server.runMultipleCells(cellIds);
-        console.log(`[PlutoKernel] Batch: run request sent`);
+        console.log(`[BetterPlutoKernel] Batch: run request sent`);
     }
 
     /**
@@ -252,12 +253,12 @@ class PlutoKernel {
 
         // Get cell code (md"""...""" cells already have the wrapper)
         const code = cell.document.getText();
-        console.log(`[PlutoKernel] executeCell called for ${cellId}, code: "${code.slice(0, 50)}..."`);
+        console.log(`[BetterPlutoKernel] executeCell called for ${cellId}, code: "${code.slice(0, 50)}..."`);
 
         // End any existing execution for this cell (prevent duplicates)
         const existingExecution = this.cellExecutions.get(cellId);
         if (existingExecution) {
-            console.log(`[PlutoKernel] Ending previous execution for ${cellId}`);
+            console.log(`[BetterPlutoKernel] Ending previous execution for ${cellId}`);
             try {
                 existingExecution.end(false, Date.now());
             } catch {}
@@ -275,13 +276,13 @@ class PlutoKernel {
 
         // Update cell code in Pluto and run
         try {
-            console.log(`[PlutoKernel] Sending updateCell for ${cellId}`);
+            console.log(`[BetterPlutoKernel] Sending updateCell for ${cellId}`);
             await this.server.updateCell(cellId, code);
-            console.log(`[PlutoKernel] Sending runCell for ${cellId}`);
+            console.log(`[BetterPlutoKernel] Sending runCell for ${cellId}`);
             await this.server.runCell(cellId);
-            console.log(`[PlutoKernel] runCell completed for ${cellId}`);
+            console.log(`[BetterPlutoKernel] runCell completed for ${cellId}`);
         } catch (err) {
-            console.error('[PlutoKernel] Failed to run cell:', err);
+            console.error('[BetterPlutoKernel] Failed to run cell:', err);
             execution.replaceOutput([
                 new vscode.NotebookCellOutput([
                     vscode.NotebookCellOutputItem.error(err as Error)
@@ -331,9 +332,9 @@ class PlutoKernel {
         }
 
         // Track cell content changes (for Cmd+S execution)
-        console.log(`[PlutoKernel] cellChanges count: ${e.cellChanges.length}`);
+        console.log(`[BetterPlutoKernel] cellChanges count: ${e.cellChanges.length}`);
         for (const cellChange of e.cellChanges) {
-            console.log(`[PlutoKernel] cellChange:`, {
+            console.log(`[BetterPlutoKernel] cellChange:`, {
                 hasDocument: !!cellChange.document,
                 hasMetadata: !!cellChange.metadata,
                 hasOutputs: !!cellChange.outputs,
@@ -342,7 +343,7 @@ class PlutoKernel {
             if (cellChange.document) {
                 const cellId = getCellId(cellChange.cell);
                 if (cellId) {
-                    console.log(`[PlutoKernel] Cell ${cellId} content changed`);
+                    console.log(`[BetterPlutoKernel] Cell ${cellId} content changed`);
                     this.modifiedCellIds.add(cellId);
                 }
             }
@@ -356,13 +357,13 @@ class PlutoKernel {
 
         if (isMove) {
             // For move operations, just update the cell order
-            console.log('[PlutoKernel] Cell move detected, updating order');
+            log('[BetterPlutoKernel] Cell move detected, updating order');
             await this.syncCellOrder();
         } else {
             // Handle actual additions and removals
             for (const cellId of removedCellIds) {
                 if (!addedCellIds.includes(cellId)) {
-                    console.log(`[PlutoKernel] Removing cell ${cellId}`);
+                    console.log(`[BetterPlutoKernel] Removing cell ${cellId}`);
                     await this.server.deleteCellOnly(cellId);
                 }
             }
@@ -373,7 +374,7 @@ class PlutoKernel {
                     const cellId = getCellId(cell);
                     if (cellId && !removedCellIds.includes(cellId)) {
                         const index = change.range.start + i;
-                        console.log(`[PlutoKernel] Adding cell ${cellId} at index ${index}`);
+                        console.log(`[BetterPlutoKernel] Adding cell ${cellId} at index ${index}`);
                         await this.server.addCellOnly(cellId, cell.document.getText());
                     }
                 }
@@ -388,15 +389,15 @@ class PlutoKernel {
      * Handle notebook save - execute modified cells
      */
     async handleNotebookSave(): Promise<void> {
-        console.log(`[PlutoKernel] handleNotebookSave called, isRunning=${this._isRunning}, modifiedCells=${this.modifiedCellIds.size}`);
+        console.log(`[BetterPlutoKernel] handleNotebookSave called, isRunning=${this._isRunning}, modifiedCells=${this.modifiedCellIds.size}`);
         if (!this._isRunning) return;
 
         if (this.modifiedCellIds.size === 0) {
-            console.log('[PlutoKernel] No modified cells to execute on save');
+            log('[BetterPlutoKernel] No modified cells to execute on save');
             return;
         }
 
-        console.log(`[PlutoKernel] Executing ${this.modifiedCellIds.size} modified cells on save`);
+        console.log(`[BetterPlutoKernel] Executing ${this.modifiedCellIds.size} modified cells on save`);
 
         // Find the cells to execute
         const cellsToExecute: vscode.NotebookCell[] = [];
@@ -438,8 +439,8 @@ class PlutoKernel {
                           currentOrder.every((id, idx) => serverOrder[idx] === id);
 
         if (!sameOrder) {
-            console.log('[PlutoKernel] Syncing cell order with Pluto');
-            console.log('[PlutoKernel] Current order:', currentOrder);
+            log('[BetterPlutoKernel] Syncing cell order with Pluto');
+            log(`[BetterPlutoKernel] Current order: ${JSON.stringify(currentOrder)}`);
             await this.server.updateCellOrder(currentOrder);
         }
     }
@@ -473,12 +474,12 @@ class PlutoKernel {
         });
 
         this.server.on('error', (err: Error) => {
-            console.error('[PlutoKernel] Server error:', err);
+            console.error('[BetterPlutoKernel] Server error:', err);
             vscode.window.showErrorMessage(`Pluto error: ${err.message}`);
         });
 
         this.server.on('closed', () => {
-            console.log('[PlutoKernel] Server closed');
+            log('[BetterPlutoKernel] Server closed');
             this._isRunning = false;
             this.onStateChange();
         });
@@ -488,7 +489,7 @@ class PlutoKernel {
      * Handle cell state update from Pluto
      */
     private handleCellState(cellId: string, state: Partial<CellState>): void {
-        console.log(`[PlutoKernel] Cell state update for ${cellId}:`, JSON.stringify(state).slice(0, 200));
+        console.log(`[BetterPlutoKernel] Cell state update for ${cellId}:`, JSON.stringify(state).slice(0, 200));
 
         // Track that Pluto knows about this cell
         this.knownCellIds.add(cellId);
@@ -503,17 +504,17 @@ class PlutoKernel {
             const isObjectIdOnly = state.output.mime === 'application/vnd.pluto.tree+object' &&
                                    isPlutoObjectId(state.output.body);
             if (isObjectIdOnly && existingOutput.body && existingOutput.mime === 'application/vnd.pluto.tree+object') {
-                console.log(`[PlutoKernel] Cell ${cellId} skipping objectid-only update, keeping existing tree data`);
+                console.log(`[BetterPlutoKernel] Cell ${cellId} skipping objectid-only update, keeping existing tree data`);
             } else {
                 existingOutput.body = state.output.body;
                 existingOutput.mime = state.output.mime;
-                console.log(`[PlutoKernel] Cell ${cellId} output - mime: ${state.output.mime}, body preview: ${existingOutput.body?.slice(0, 100)}`);
+                console.log(`[BetterPlutoKernel] Cell ${cellId} output - mime: ${state.output.mime}, body preview: ${existingOutput.body?.slice(0, 100)}`);
             }
         }
 
         if (state.logs) {
             existingOutput.logs = state.logs;
-            console.log(`[PlutoKernel] Cell ${cellId} logs:`, state.logs);
+            console.log(`[BetterPlutoKernel] Cell ${cellId} logs:`, state.logs);
         }
 
         this.cellOutputs.set(cellId, existingOutput);
@@ -577,7 +578,7 @@ class PlutoKernel {
             } else if (mime === 'text/html') {
                 // Render HTML - always use custom MIME type for Pluto HTML
                 // This triggers our custom renderer which handles interactive elements and math
-                console.log(`[PlutoKernel] Cell ${cellId} HTML output preview: ${existingOutput.body.slice(0, 200)}`);
+                console.log(`[BetterPlutoKernel] Cell ${cellId} HTML output preview: ${existingOutput.body.slice(0, 200)}`);
                 outputs.push(new vscode.NotebookCellOutput([
                     vscode.NotebookCellOutputItem.text(existingOutput.body, 'application/vnd.pluto.html+html')
                 ]));
@@ -613,7 +614,7 @@ class PlutoKernel {
             } else if (mime === 'text/plain') {
                 // For text/plain, ensure proper HTML escaping for display
                 // VS Code's default renderer should handle this, but we ensure it's safe
-                console.log(`[PlutoKernel] Rendering text/plain output for cell ${cellId}, body length: ${existingOutput.body.length}, preview: ${JSON.stringify(existingOutput.body.substring(0, 100))}`);
+                console.log(`[BetterPlutoKernel] Rendering text/plain output for cell ${cellId}, body length: ${existingOutput.body.length}, preview: ${JSON.stringify(existingOutput.body.substring(0, 100))}`);
                 outputs.push(new vscode.NotebookCellOutput([
                     vscode.NotebookCellOutputItem.text(existingOutput.body, 'text/plain')
                 ]));
@@ -626,7 +627,7 @@ class PlutoKernel {
 
         // Update execution output if we have an execution
         if (execution) {
-            console.log(`[PlutoKernel] Updating execution for ${cellId} with ${outputs.length} outputs`);
+            console.log(`[BetterPlutoKernel] Updating execution for ${cellId} with ${outputs.length} outputs`);
             if (outputs.length > 0) {
                 execution.replaceOutput(outputs);
             }
@@ -637,7 +638,7 @@ class PlutoKernel {
                               (state.runtime !== undefined && outputs.length > 0);
 
             if (shouldEnd) {
-                console.log(`[PlutoKernel] Ending execution for ${cellId} (running=${state.running}, runtime=${state.runtime})`);
+                console.log(`[BetterPlutoKernel] Ending execution for ${cellId} (running=${state.running}, runtime=${state.runtime})`);
                 const success = !state.errored;
                 execution.end(success, Date.now());
                 this.cellExecutions.delete(cellId);
@@ -646,7 +647,7 @@ class PlutoKernel {
         } else {
             // No active execution - this might be initial state from Pluto or reactive update
             // Schedule a debounced direct update to collect all state changes
-            console.log(`[PlutoKernel] No execution for ${cellId}, scheduling direct update`);
+            console.log(`[BetterPlutoKernel] No execution for ${cellId}, scheduling direct update`);
             this.scheduleDirectUpdate(cellId);
         }
     }
@@ -737,7 +738,7 @@ class PlutoKernel {
             } else if (mime === 'text/html') {
                 // Render HTML - always use custom MIME type for Pluto HTML
                 // This triggers our custom renderer which handles interactive elements and math
-                console.log(`[PlutoKernel] Cell ${cellId} HTML output (direct) preview: ${existingOutput.body.slice(0, 200)}`);
+                console.log(`[BetterPlutoKernel] Cell ${cellId} HTML output (direct) preview: ${existingOutput.body.slice(0, 200)}`);
                 outputs.push(new vscode.NotebookCellOutput([
                     vscode.NotebookCellOutputItem.text(existingOutput.body, 'application/vnd.pluto.html+html')
                 ]));
@@ -774,13 +775,13 @@ class PlutoKernel {
                 // For text/plain, check if it's actually HTML content that was mislabeled
                 // (This can happen with md"""...""" cells when mime arrives before body)
                 if (existingOutput.body.trim().startsWith('<')) {
-                    console.log(`[PlutoKernel] Cell ${cellId} output looks like HTML, treating as HTML: ${existingOutput.body.slice(0, 200)}`);
+                    console.log(`[BetterPlutoKernel] Cell ${cellId} output looks like HTML, treating as HTML: ${existingOutput.body.slice(0, 200)}`);
                     // Always use custom renderer for Pluto HTML to enable math rendering
                     outputs.push(new vscode.NotebookCellOutput([
                         vscode.NotebookCellOutputItem.text(existingOutput.body, 'application/vnd.pluto.html+html')
                     ]));
                 } else {
-                    console.log(`[PlutoKernel] Rendering text/plain output (direct update) for cell ${cellId}, body length: ${existingOutput.body.length}, preview: ${JSON.stringify(existingOutput.body.substring(0, 100))}`);
+                    console.log(`[BetterPlutoKernel] Rendering text/plain output (direct update) for cell ${cellId}, body length: ${existingOutput.body.length}, preview: ${JSON.stringify(existingOutput.body.substring(0, 100))}`);
                     outputs.push(new vscode.NotebookCellOutput([
                         vscode.NotebookCellOutputItem.text(existingOutput.body, 'text/plain')
                     ]));
@@ -800,7 +801,7 @@ class PlutoKernel {
             const id = getCellId(cell);
 
             if (id === cellId) {
-                console.log(`[PlutoKernel] Direct update for ${cellId} at index ${i} with ${outputs.length} outputs`);
+                console.log(`[BetterPlutoKernel] Direct update for ${cellId} at index ${i} with ${outputs.length} outputs`);
 
                 try {
                     // Create a temporary execution to update the output
@@ -809,9 +810,9 @@ class PlutoKernel {
                     await execution.replaceOutput(outputs);
                     execution.end(true, Date.now());
 
-                    console.log(`[PlutoKernel] Updated cell ${cellId} successfully`);
+                    console.log(`[BetterPlutoKernel] Updated cell ${cellId} successfully`);
                 } catch (err) {
-                    console.error(`[PlutoKernel] Failed to update cell ${cellId}:`, err);
+                    console.error(`[BetterPlutoKernel] Failed to update cell ${cellId}:`, err);
                 }
                 break;
             }
@@ -858,18 +859,18 @@ class PlutoKernel {
     private parsePlutoTreeObject(body: string): string {
         // Check if body is just an objectid (hex string) - Pluto sometimes sends this
         if (isPlutoObjectId(body)) {
-            console.log('[PlutoKernel] Tree object is just objectid, returning placeholder');
+            log('[BetterPlutoKernel] Tree object is just objectid, returning placeholder');
             return '(computing...)';
         }
 
         try {
             const treeObj = JSON.parse(body);
-            console.log('[PlutoKernel] Tree object structure:', JSON.stringify(treeObj, null, 2).substring(0, 3000));
+            log(`[BetterPlutoKernel] Tree object structure: ${JSON.stringify(treeObj, null, 2).substring(0, 3000)}`);
             const result = this.extractPlutoTree(treeObj);
-            console.log('[PlutoKernel] Tree object result:', result);
+            log(`[BetterPlutoKernel] Tree object result: ${result}`);
             return result;
         } catch (e) {
-            console.log('[PlutoKernel] Tree object parse error:', e);
+            log(`[BetterPlutoKernel] Tree object parse error: ${e}`);
             // If parsing fails, return as-is (might be plain text)
             return body;
         }
@@ -1049,7 +1050,7 @@ document.addEventListener('click', function(e) {
 </script>
 ${treeHtml}`;
         } catch (e) {
-            console.log('[PlutoKernel] Tree HTML render error:', e);
+            log(`[BetterPlutoKernel] Tree HTML render error: ${e}`);
             return `<pre>${this.escapeHtml(body)}</pre>`;
         }
     }
@@ -1470,7 +1471,7 @@ export class PlutoNotebookController implements vscode.Disposable {
         if (kernel && kernel.isRunning) {
             await kernel.setBond(name, value);
         } else {
-            console.log('[PlutoController] Cannot set bond, kernel not running');
+            log('[BetterPlutoController] Cannot set bond, kernel not running');
         }
     }
 
@@ -1483,7 +1484,7 @@ export class PlutoNotebookController implements vscode.Disposable {
         if (kernel && kernel.isRunning) {
             await kernel.handleNotebookSave();
         } else {
-            console.log('[PlutoController] Cannot execute modified cells, kernel not running');
+            log('[BetterPlutoController] Cannot execute modified cells, kernel not running');
         }
     }
 
@@ -1496,13 +1497,13 @@ export class PlutoNotebookController implements vscode.Disposable {
         if (kernel && kernel.isRunning) {
             try {
                 const result = await kernel.getPublishedObject(objectid);
-                console.log('[PlutoController] Got published object:', JSON.stringify(result).substring(0, 200));
+                log(`[BetterPlutoController] Got published object: ${JSON.stringify(result).substring(0, 200)}`);
                 // TODO: Update the cell output with the expanded data
             } catch (error) {
-                console.error('[PlutoController] Failed to get published object:', error);
+                console.error('[BetterPlutoController] Failed to get published object:', error);
             }
         } else {
-            console.log('[PlutoController] Cannot get published object, kernel not running');
+            log('[BetterPlutoController] Cannot get published object, kernel not running');
         }
     }
 
@@ -1550,10 +1551,10 @@ export class PlutoNotebookController implements vscode.Disposable {
         notebook: vscode.NotebookDocument,
         _controller: vscode.NotebookController
     ): Promise<void> {
-        console.log(`[PlutoController] executeHandler called with ${cells.length} cells`);
+        console.log(`[BetterPlutoController] executeHandler called with ${cells.length} cells`);
         for (let i = 0; i < cells.length; i++) {
             const cell = cells[i];
-            console.log(`[PlutoController] Cell ${i}: content=${cell.document.getText().slice(0, 50)}`);
+            console.log(`[BetterPlutoController] Cell ${i}: content=${cell.document.getText().slice(0, 50)}`);
         }
 
         const kernel = await this.getOrCreateKernel(notebook);
@@ -1564,7 +1565,7 @@ export class PlutoNotebookController implements vscode.Disposable {
      * Interrupt handler called by VS Code when user stops execution
      */
     private async interruptHandler(notebook: vscode.NotebookDocument): Promise<void> {
-        console.log('[PlutoController] Interrupt requested for', notebook.uri.fsPath);
+        log(`[BetterPlutoController] Interrupt requested for ${notebook.uri.fsPath}`);
         const key = notebook.uri.toString();
         const kernel = this.kernels.get(key);
         if (kernel) {

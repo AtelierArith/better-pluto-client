@@ -6,6 +6,7 @@ import { spawn, ChildProcess } from 'child_process';
 import { createConnection, Socket } from 'net';
 import { encode, decode } from '@msgpack/msgpack';
 import { EventEmitter } from 'events';
+import { log } from './extension';
 
 /**
  * Check if a string is a Pluto objectid (12-20 character hex string)
@@ -80,7 +81,7 @@ export class PlutoServer extends EventEmitter {
     async start(notebookPath: string): Promise<void> {
         this.port = await this.findPort();
 
-        console.log(`[PlutoServer] Starting on port ${this.port}`);
+        log(`[BetterPlutoServer] Starting on port ${this.port}`);
 
         const juliaCode = `
             import Pluto
@@ -124,7 +125,7 @@ export class PlutoServer extends EventEmitter {
                     if (match) {
                         this.notebookId = match[1];
                         notebookIdFound = true;
-                        console.log('[PlutoServer] Notebook ID:', this.notebookId);
+                        log(`[BetterPlutoServer] Notebook ID: ${this.notebookId}`);
                     }
                 }
             });
@@ -137,7 +138,7 @@ export class PlutoServer extends EventEmitter {
                 // Pluto prints "Go to http://localhost:PORT/" when HTTP server is ready
                 if (!resolved && stderrBuffer.includes('Go to http://localhost')) {
                     resolved = true;
-                    console.log('[PlutoServer] HTTP server is ready, connecting WebSocket...');
+                    log('[BetterPlutoServer] HTTP server is ready, connecting WebSocket...');
 
                     // Give the server a moment to fully initialize
                     setTimeout(async () => {
@@ -161,7 +162,7 @@ export class PlutoServer extends EventEmitter {
             });
 
             this.process.on('exit', (code) => {
-                console.log('[PlutoServer] Process exited with code', code);
+                log(`[BetterPlutoServer] Process exited with code ${code}`);
                 this.isReady = false;
                 this.emit('closed');
             });
@@ -185,14 +186,14 @@ export class PlutoServer extends EventEmitter {
 
         return new Promise((resolve, reject) => {
             const url = `ws://127.0.0.1:${this.port}/`;
-            console.log('[PlutoServer] Connecting to', url);
+            log(`[BetterPlutoServer] Connecting to ${url}`);
 
             try {
                 const socket = new WS(url);
                 this.ws = socket as unknown as WebSocket;
 
                 socket.on('open', () => {
-                    console.log('[PlutoServer] WebSocket connected');
+                    log('[BetterPlutoServer] WebSocket connected');
 
                     // Send connect message
                     this.sendMessage('connect', {
@@ -213,16 +214,16 @@ export class PlutoServer extends EventEmitter {
                 });
 
                 socket.on('error', (err: Error) => {
-                    console.error('[PlutoServer] WebSocket error:', err.message);
+                    console.error('[BetterPlutoServer] WebSocket error:', err.message);
                     reject(new Error(`WebSocket connection failed: ${err.message}`));
                 });
 
                 socket.on('close', () => {
-                    console.log('[PlutoServer] WebSocket closed');
+                    log('[BetterPlutoServer] WebSocket closed');
                     this.emit('closed');
                 });
             } catch (err) {
-                console.error('[PlutoServer] Failed to create WebSocket:', err);
+                console.error('[BetterPlutoServer] Failed to create WebSocket:', err);
                 reject(err);
             }
         });
@@ -233,14 +234,14 @@ export class PlutoServer extends EventEmitter {
      */
     private sendMessage(type: string, body: Record<string, unknown> = {}): void {
         if (!this.ws) {
-            console.error('[PlutoServer] Cannot send message, WebSocket not initialized');
+            console.error('[BetterPlutoServer] Cannot send message, WebSocket not initialized');
             return;
         }
 
         // Check if socket is open (readyState 1 = OPEN)
         const socket = this.ws as any;
         if (socket.readyState !== 1) {
-            console.error('[PlutoServer] Cannot send message, WebSocket not open (state:', socket.readyState, ')');
+            console.error('[BetterPlutoServer] Cannot send message, WebSocket not open (state:', socket.readyState, ')');
             return;
         }
 
@@ -252,7 +253,7 @@ export class PlutoServer extends EventEmitter {
             notebook_id: this.notebookId,
         };
 
-        console.log('[PlutoServer] Sending:', type);
+        log(`[BetterPlutoServer] Sending: ${type}`);
         const encoded = encode(message);
         socket.send(Buffer.from(encoded));
     }
@@ -270,17 +271,17 @@ export class PlutoServer extends EventEmitter {
             const message = decode(uint8) as Record<string, unknown>;
             const type = message.type as string;
 
-            console.log('[PlutoServer] Received:', type);
+            log(`[BetterPlutoServer] Received: ${type}`);
 
             if (type === '👋') {
-                console.log('[PlutoServer] Got welcome message from Pluto');
+                log('[BetterPlutoServer] Got welcome message from Pluto');
             } else if (type === 'notebook_diff') {
                 this.handleNotebookDiff(message);
             } else if (type === 'object_result') {
                 this.handleObjectResult(message);
             }
         } catch (err) {
-            console.error('[PlutoServer] Error handling message:', err);
+            console.error('[BetterPlutoServer] Error handling message:', err);
         }
     }
 
@@ -310,7 +311,7 @@ export class PlutoServer extends EventEmitter {
                 if (fullState?.cell_order && Array.isArray(fullState.cell_order)) {
                     this.cellOrder = fullState.cell_order as string[];
                     this.knownCellIds = new Set(this.cellOrder);
-                    console.log(`[PlutoServer] Initial cell order: ${this.cellOrder.length} cells`);
+                    console.log(`[BetterPlutoServer] Initial cell order: ${this.cellOrder.length} cells`);
                 }
                 continue;
             }
@@ -346,7 +347,7 @@ export class PlutoServer extends EventEmitter {
      * Handle full cell results from initial state
      */
     private handleFullCellResults(cellResults: Record<string, unknown>): void {
-        console.log('[PlutoServer] Processing full cell results');
+        log('[BetterPlutoServer] Processing full cell results');
         for (const [cellId, result] of Object.entries(cellResults)) {
             this.handleCellResult(cellId, result as Record<string, unknown>);
         }
@@ -375,10 +376,10 @@ export class PlutoServer extends EventEmitter {
         }
         if (result.logs) {
             state.logs = this.extractLogs(result.logs as unknown[]);
-            console.log(`[PlutoServer] Cell ${cellId} has ${state.logs?.length || 0} logs`);
+            console.log(`[BetterPlutoServer] Cell ${cellId} has ${state.logs?.length || 0} logs`);
         }
 
-        console.log(`[PlutoServer] Cell ${cellId} full result:`, JSON.stringify(state).slice(0, 200));
+        console.log(`[BetterPlutoServer] Cell ${cellId} full result:`, JSON.stringify(state).slice(0, 200));
         this.emit('cellState', cellId, state);
     }
 
@@ -417,7 +418,7 @@ export class PlutoServer extends EventEmitter {
             return;
         }
 
-        console.log(`[PlutoServer] Cell ${cellId} field ${field}:`, JSON.stringify(value)?.slice(0, 100));
+        console.log(`[BetterPlutoServer] Cell ${cellId} field ${field}:`, JSON.stringify(value)?.slice(0, 100));
         this.emit('cellState', cellId, state);
     }
 
@@ -427,7 +428,7 @@ export class PlutoServer extends EventEmitter {
     private extractSingleLog(logObj: Record<string, unknown>): LogEntry | null {
         const level = String(logObj.level || 'LogLevel(-555)'); // Default to stdout level
 
-        console.log('[PlutoServer] Single log entry:', JSON.stringify(logObj).slice(0, 300));
+        log(`[BetterPlutoServer] Single log entry: ${JSON.stringify(logObj).slice(0, 300)}`);
 
         // Extract message - msg is an array with [content, mime] format
         let msg = '';
@@ -444,7 +445,7 @@ export class PlutoServer extends EventEmitter {
             line: logObj.line as number | undefined,
         };
 
-        console.log('[PlutoServer] Extracted single log:', entry);
+        log(`[BetterPlutoServer] Extracted single log: ${JSON.stringify(entry)}`);
         return entry;
     }
 
@@ -453,17 +454,17 @@ export class PlutoServer extends EventEmitter {
      */
     private extractLogs(logsArray: unknown[]): LogEntry[] {
         if (!Array.isArray(logsArray)) {
-            console.log('[PlutoServer] logs is not an array:', typeof logsArray);
+            log(`[BetterPlutoServer] logs is not an array: ${typeof logsArray}`);
             return [];
         }
 
-        console.log(`[PlutoServer] Extracting ${logsArray.length} logs`);
+        console.log(`[BetterPlutoServer] Extracting ${logsArray.length} logs`);
 
         const result = logsArray.map(log => {
             return this.extractSingleLog(log as Record<string, unknown>);
         }).filter((log): log is LogEntry => log !== null);
 
-        console.log(`[PlutoServer] Extracted logs:`, result);
+        console.log(`[BetterPlutoServer] Extracted logs:`, result);
         return result;
     }
 
@@ -498,17 +499,17 @@ export class PlutoServer extends EventEmitter {
             const isObjectIdOnly = output.mime === 'application/vnd.pluto.tree+object' &&
                                    isPlutoObjectId(newBody);
             if (isObjectIdOnly && output.body && output.body.length > 20) {
-                console.log(`[PlutoServer] Cell ${cellId} skipping objectid-only update, keeping existing tree data`);
+                console.log(`[BetterPlutoServer] Cell ${cellId} skipping objectid-only update, keeping existing tree data`);
                 return; // Don't emit update
             }
 
             if (newBody !== undefined) {
                 output.body = newBody;
             }
-            console.log(`[PlutoServer] Cell ${cellId} output.body: ${output.body?.slice(0, 100)}`);
+            console.log(`[BetterPlutoServer] Cell ${cellId} output.body: ${output.body?.slice(0, 100)}`);
         } else if (subField === 'mime') {
             output.mime = value as string;
-            console.log(`[PlutoServer] Cell ${cellId} output.mime: ${output.mime}`);
+            console.log(`[BetterPlutoServer] Cell ${cellId} output.mime: ${output.mime}`);
         } else {
             // Skip other subfields like last_run_timestamp, rootassignee, etc.
             return;
@@ -572,7 +573,7 @@ export class PlutoServer extends EventEmitter {
             }
         }
 
-        console.log(`[PlutoServer] Extracted output mime: ${mime}, body length: ${body.length}, preview: ${body.slice(0, 50)}`);
+        console.log(`[BetterPlutoServer] Extracted output mime: ${mime}, body length: ${body.length}, preview: ${body.slice(0, 50)}`);
         return { body, mime };
     }
 
@@ -582,12 +583,12 @@ export class PlutoServer extends EventEmitter {
      * For binary data, always returns base64 to preserve bytes
      */
     private tryDecodeMsgpackBinary(body: unknown, mime: string): string | null {
-        console.log(`[PlutoServer] tryDecodeMsgpackBinary: type=${typeof body}, isArray=${Array.isArray(body)}, isUint8Array=${body instanceof Uint8Array}`);
+        console.log(`[BetterPlutoServer] tryDecodeMsgpackBinary: type=${typeof body}, isArray=${Array.isArray(body)}, isUint8Array=${body instanceof Uint8Array}`);
 
         // Handle Uint8Array or Buffer directly (from msgpack decoder)
         if (body instanceof Uint8Array || Buffer.isBuffer(body)) {
             const bytes = body instanceof Uint8Array ? body : new Uint8Array(body);
-            console.log(`[PlutoServer] Direct binary data: ${bytes.length} bytes, first 10: [${Array.from(bytes.slice(0, 10)).join(', ')}]`);
+            console.log(`[BetterPlutoServer] Direct binary data: ${bytes.length} bytes, first 10: [${Array.from(bytes.slice(0, 10)).join(', ')}]`);
 
             const isPNG = bytes[0] === 137 && bytes[1] === 80 && bytes[2] === 78 && bytes[3] === 71;
             const isJPEG = bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255;
@@ -595,7 +596,7 @@ export class PlutoServer extends EventEmitter {
 
             if (isBinaryImage) {
                 const result = Buffer.from(bytes).toString('base64');
-                console.log(`[PlutoServer] Direct binary -> base64: ${result.length} chars`);
+                console.log(`[BetterPlutoServer] Direct binary -> base64: ${result.length} chars`);
                 return result;
             } else {
                 return Buffer.from(bytes).toString('utf-8');
@@ -629,21 +630,21 @@ export class PlutoServer extends EventEmitter {
         const allKeys = Object.keys(dataObj);
         const keys = allKeys.map(k => parseInt(k)).filter(k => !isNaN(k)).sort((a, b) => a - b);
 
-        console.log(`[PlutoServer] Msgpack binary: ${allKeys.length} total keys, ${keys.length} numeric keys`);
+        console.log(`[BetterPlutoServer] Msgpack binary: ${allKeys.length} total keys, ${keys.length} numeric keys`);
 
         if (keys.length === 0) return null;
 
         // Check if keys are contiguous
         const maxKey = keys[keys.length - 1];
         const minKey = keys[0];
-        console.log(`[PlutoServer] Key range: ${minKey} to ${maxKey}, expected length: ${maxKey - minKey + 1}`);
+        console.log(`[BetterPlutoServer] Key range: ${minKey} to ${maxKey}, expected length: ${maxKey - minKey + 1}`);
 
         const bytes = new Uint8Array(maxKey + 1);
         for (const key of keys) {
             bytes[key] = dataObj[String(key)];
         }
 
-        console.log(`[PlutoServer] Decoded msgpack binary for ${mime}: ${bytes.length} bytes, first 10: [${Array.from(bytes.slice(0, 10)).join(', ')}]`);
+        console.log(`[BetterPlutoServer] Decoded msgpack binary for ${mime}: ${bytes.length} bytes, first 10: [${Array.from(bytes.slice(0, 10)).join(', ')}]`);
 
         // Check if this looks like binary data (PNG, JPEG, etc.) by checking magic bytes
         const isPNG = bytes[0] === 137 && bytes[1] === 80 && bytes[2] === 78 && bytes[3] === 71;
@@ -654,12 +655,12 @@ export class PlutoServer extends EventEmitter {
         let result: string;
         if (isBinaryImage) {
             result = Buffer.from(bytes).toString('base64');
-            console.log(`[PlutoServer] Base64 encoded (binary image detected): ${result.length} chars`);
+            console.log(`[BetterPlutoServer] Base64 encoded (binary image detected): ${result.length} chars`);
         } else {
             result = Buffer.from(bytes).toString('utf-8');
         }
 
-        console.log(`[PlutoServer] Decoded msgpack binary: ${bytes.length} bytes -> ${result.length} chars`);
+        console.log(`[BetterPlutoServer] Decoded msgpack binary: ${bytes.length} bytes -> ${result.length} chars`);
         return result;
     }
 
@@ -686,7 +687,7 @@ export class PlutoServer extends EventEmitter {
      * This triggers reactive execution of dependent cells
      */
     async setBond(name: string, value: unknown): Promise<void> {
-        console.log(`[PlutoServer] Setting bond ${name} to`, value);
+        console.log(`[BetterPlutoServer] Setting bond ${name} to`, value);
         this.sendMessage('update_notebook', {
             updates: [{
                 path: ['bonds', name],
@@ -701,7 +702,7 @@ export class PlutoServer extends EventEmitter {
      * Used to expand "show more" in tree views
      */
     async getPublishedObject(objectid: string): Promise<unknown> {
-        console.log(`[PlutoServer] Getting published object: ${objectid}`);
+        console.log(`[BetterPlutoServer] Getting published object: ${objectid}`);
 
         return new Promise((resolve, reject) => {
             const requestId = this.generateId();
@@ -727,7 +728,7 @@ export class PlutoServer extends EventEmitter {
                 notebook_id: this.notebookId,
             };
 
-            console.log('[PlutoServer] Sending get_published_object request:', requestId);
+            log(`[BetterPlutoServer] Sending get_published_object request: ${requestId}`);
             const encoded = encode(message);
             socket.send(Buffer.from(encoded));
 
@@ -748,7 +749,7 @@ export class PlutoServer extends EventEmitter {
         const requestId = message.request_id as string;
         const body = message.body as Record<string, unknown>;
 
-        console.log('[PlutoServer] Received object_result for request:', requestId);
+        log(`[BetterPlutoServer] Received object_result for request: ${requestId}`);
 
         const pending = this.pendingObjectRequests.get(requestId);
         if (pending) {
@@ -766,7 +767,7 @@ export class PlutoServer extends EventEmitter {
      * Interrupt all running cells
      */
     async interruptAll(): Promise<void> {
-        console.log('[PlutoServer] Interrupting all cells');
+        log('[BetterPlutoServer] Interrupting all cells');
         this.sendMessage('interrupt_all', {});
     }
 
@@ -776,7 +777,7 @@ export class PlutoServer extends EventEmitter {
      * when the notebook is saved/synced.
      */
     async addCell(cellId: string, index: number, code: string = ''): Promise<void> {
-        console.log(`[PlutoServer] Adding cell ${cellId} at index ${index}`);
+        console.log(`[BetterPlutoServer] Adding cell ${cellId} at index ${index}`);
 
         // First, add the cell to cell_inputs with its full structure
         // Then add to cell_order
@@ -827,7 +828,7 @@ export class PlutoServer extends EventEmitter {
      * Delete a cell from the notebook
      */
     async deleteCell(cellId: string, index: number): Promise<void> {
-        console.log(`[PlutoServer] Deleting cell ${cellId} at index ${index}`);
+        console.log(`[BetterPlutoServer] Deleting cell ${cellId} at index ${index}`);
 
         // Update local tracking first
         this.cellOrder = this.cellOrder.filter(id => id !== cellId);
@@ -853,7 +854,7 @@ export class PlutoServer extends EventEmitter {
      * Used when cell order will be updated separately (e.g., during move operations)
      */
     async deleteCellOnly(cellId: string): Promise<void> {
-        console.log(`[PlutoServer] Deleting cell input only: ${cellId}`);
+        console.log(`[BetterPlutoServer] Deleting cell input only: ${cellId}`);
 
         this.knownCellIds.delete(cellId);
 
@@ -872,7 +873,7 @@ export class PlutoServer extends EventEmitter {
      * Used when cell order will be updated separately (e.g., during move operations)
      */
     async addCellOnly(cellId: string, code: string = ''): Promise<void> {
-        console.log(`[PlutoServer] Adding cell input only: ${cellId}`);
+        console.log(`[BetterPlutoServer] Adding cell input only: ${cellId}`);
 
         this.knownCellIds.add(cellId);
 
@@ -896,7 +897,7 @@ export class PlutoServer extends EventEmitter {
      * This sends the new cell_order array to Pluto, triggering reactive re-evaluation
      */
     async updateCellOrder(newOrder: string[]): Promise<void> {
-        console.log(`[PlutoServer] Updating cell order: ${newOrder.length} cells`);
+        console.log(`[BetterPlutoServer] Updating cell order: ${newOrder.length} cells`);
 
         // Update local tracking
         this.cellOrder = newOrder;
