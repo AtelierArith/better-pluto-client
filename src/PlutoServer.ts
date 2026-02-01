@@ -59,9 +59,17 @@ export class PlutoServer extends EventEmitter {
     // Track known cell IDs and their order
     private knownCellIds = new Set<string>();
     private cellOrder: string[] = [];
+    
+    // Track cells that are being added but not yet confirmed by Pluto
+    // This prevents syncCellOrder from sending cell_order without these cells
+    private pendingCellIds = new Set<string>();
 
     // Track pending get_published_object requests
     private pendingObjectRequests: Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }> = new Map();
+    
+    // Map VS Code cell IDs to Pluto cell IDs (for future use if needed)
+    private vscodeToPlutoId = new Map<string, string>();
+    private plutoToVscodeId = new Map<string, string>();
 
     constructor() {
         super();
@@ -73,6 +81,15 @@ export class PlutoServer extends EventEmitter {
      */
     getCellOrder(): string[] {
         return [...this.cellOrder];
+    }
+
+    /**
+     * Check if a cell is known to Pluto (has cell_inputs registered) or is pending addition.
+     * Pending cells are included so that syncCellOrder doesn't accidentally exclude them
+     * while addCellOnly is waiting for Pluto's confirmation.
+     */
+    isKnownCell(cellId: string): boolean {
+        return this.knownCellIds.has(cellId) || this.pendingCellIds.has(cellId);
     }
 
     /**
@@ -93,7 +110,7 @@ export class PlutoServer extends EventEmitter {
                     require_secret_for_access = false,
                     require_secret_for_open_links = false,
                     disable_writing_notebook_files = true,
-                    auto_reload_from_file = false,
+                    auto_reload_from_file = true,
                 )
             )
 
@@ -282,6 +299,9 @@ export class PlutoServer extends EventEmitter {
 
             log(`[BetterPlutoServer] Received: ${type}`);
 
+            // Log ALL message types to debug add_cell response
+            log(`[BetterPlutoServer] Received message type: ${type}`);
+            
             if (type === '👋') {
                 log('[BetterPlutoServer] Got welcome message from Pluto');
             } else if (type === 'notebook_diff') {
@@ -297,6 +317,9 @@ export class PlutoServer extends EventEmitter {
                 log(`[BetterPlutoServer] run_feedback: ${JSON.stringify(message).slice(0, 300)}`);
             } else if (type === 'object_result') {
                 this.handleObjectResult(message);
+            } else {
+                // Log unknown message types with full content for debugging
+                log(`[BetterPlutoServer] Unknown message: ${JSON.stringify(message).slice(0, 500)}`);
             }
         } catch (err) {
             console.error('[BetterPlutoServer] Error handling message:', err);
@@ -339,7 +362,8 @@ export class PlutoServer extends EventEmitter {
                     } else {
                         this.knownCellIds = new Set(this.cellOrder);
                     }
-                    console.log(`[BetterPlutoServer] Initial cell order: ${this.cellOrder.length} cells`);
+                    log(`[BetterPlutoServer] Initial cell order: ${this.cellOrder.length} cells: [${this.cellOrder.join(', ')}]`);
+                    log(`[BetterPlutoServer] Known cell IDs: [${Array.from(this.knownCellIds).join(', ')}]`);
                 }
                 continue;
             }
@@ -350,8 +374,18 @@ export class PlutoServer extends EventEmitter {
                 if (cellId) {
                     if (patch.op === 'remove') {
                         this.knownCellIds.delete(cellId);
+                        // Also remove from pending if Pluto explicitly removed it
+                        if (this.pendingCellIds.has(cellId)) {
+                            this.pendingCellIds.delete(cellId);
+                            log(`[BetterPlutoServer] Cell ${cellId} removed by Pluto, cleared from pendingCellIds`);
+                        }
                     } else if (patch.op === 'add' || patch.op === 'replace') {
                         this.knownCellIds.add(cellId);
+                        // Remove from pending since it's now confirmed
+                        if (this.pendingCellIds.has(cellId)) {
+                            this.pendingCellIds.delete(cellId);
+                            log(`[BetterPlutoServer] Cell ${cellId} confirmed via ${patch.op}, removed from pendingCellIds`);
+                        }
                     }
                 }
                 continue;
@@ -359,7 +393,9 @@ export class PlutoServer extends EventEmitter {
 
             // Track cell order changes (no-op for execution, but keep local order in sync)
             if (path[0] === 'cell_order' && patch.op === 'replace' && Array.isArray(patch.value)) {
-                this.cellOrder = patch.value as string[];
+                const newOrder = patch.value as string[];
+                log(`[BetterPlutoServer] cell_order updated: [${newOrder.join(', ')}]`);
+                this.cellOrder = newOrder;
                 continue;
             }
 
@@ -932,27 +968,84 @@ export class PlutoServer extends EventEmitter {
     }
 
     /**
-     * Add a cell without updating cell_order
-     * Used when cell order will be updated separately (e.g., during move operations)
+     * Get the Pluto cell ID for a VS Code cell ID (handles ID mapping)
      */
-    async addCellOnly(cellId: string, code: string = ''): Promise<void> {
-        console.log(`[BetterPlutoServer] Adding cell input only: ${cellId}`);
-
-        this.knownCellIds.add(cellId);
-
-        this.sendMessage('update_notebook', {
-            updates: [
-                {
-                    path: ['cell_inputs', cellId],
-                    op: 'add',
-                    value: {
-                        cell_id: cellId,
-                        code: code,
-                        code_folded: false,
-                    },
-                },
-            ],
+    getPlutoCellId(vscodeCellId: string): string {
+        return this.vscodeToPlutoId.get(vscodeCellId) || vscodeCellId;
+    }
+    
+    /**
+     * Get the VS Code cell ID for a Pluto cell ID (reverse mapping)
+     */
+    getVscodeCellId(plutoId: string): string {
+        return this.plutoToVscodeId.get(plutoId) || plutoId;
+    }
+    
+    /**
+     * Wait for a cell to appear in Pluto's state (via auto-reload from file).
+     * This is used after saving the notebook file with a new cell.
+     * Returns the cell ID once Pluto recognizes it.
+     */
+    async waitForCellToAppear(cellId: string, code: string = ''): Promise<string> {
+        log(`[BetterPlutoServer] Waiting for cell ${cellId} to appear in Pluto (via file auto-reload)`);
+        
+        // Mark this cell as pending
+        this.pendingCellIds.add(cellId);
+        
+        return new Promise((resolve) => {
+            const startTime = Date.now();
+            
+            // Check if cell already exists
+            if (this.knownCellIds.has(cellId)) {
+                log(`[BetterPlutoServer] Cell ${cellId} already known to Pluto`);
+                this.pendingCellIds.delete(cellId);
+                resolve(cellId);
+                return;
+            }
+            
+            // Poll for the cell to appear
+            const checkInterval = setInterval(async () => {
+                // Check if cell appeared in knownCellIds
+                if (this.knownCellIds.has(cellId)) {
+                    clearInterval(checkInterval);
+                    clearTimeout(timeout);
+                    log(`[BetterPlutoServer] Cell ${cellId} detected in Pluto`);
+                    this.pendingCellIds.delete(cellId);
+                    
+                    // Update the cell code to make sure it's correct
+                    try {
+                        await this.updateCell(cellId, code);
+                    } catch (err) {
+                        log(`[BetterPlutoServer] Failed to update cell code: ${err}`);
+                    }
+                    
+                    resolve(cellId);
+                    return;
+                }
+                
+                // Request full state periodically to help detect new cells
+                if ((Date.now() - startTime) % 1000 < 100) {
+                    this.requestFullState();
+                }
+            }, 100);
+            
+            // Timeout after 10 seconds
+            const timeout = setTimeout(() => {
+                clearInterval(checkInterval);
+                log(`[BetterPlutoServer] Timeout waiting for cell ${cellId} to appear in Pluto`);
+                this.pendingCellIds.delete(cellId);
+                // Return the original cellId even if not found
+                resolve(cellId);
+            }, 10000);
         });
+    }
+    
+    /**
+     * Legacy method - redirects to waitForCellToAppear
+     * @deprecated Use waitForCellToAppear instead
+     */
+    async addCellOnly(cellId: string, code: string = ''): Promise<string> {
+        return this.waitForCellToAppear(cellId, code);
     }
 
     /**
@@ -983,34 +1076,9 @@ export class PlutoServer extends EventEmitter {
     async updateCell(cellId: string, code: string): Promise<void> {
         log(`[BetterPlutoServer] updateCell request: ${cellId}, length=${code.length}`);
         if (!this.knownCellIds.has(cellId)) {
-            log(`[BetterPlutoServer] updateCell missing cell_inputs for ${cellId}, sending add`);
-            this.knownCellIds.add(cellId);
-            const hasInOrder = this.cellOrder.includes(cellId);
-            const nextOrder = hasInOrder ? this.cellOrder : [...this.cellOrder, cellId];
-            if (!hasInOrder) {
-                this.cellOrder = nextOrder;
-            }
-            // First ensure cell_order includes the new cell
-            this.sendMessage('update_notebook', {
-                updates: [{
-                    path: ['cell_order'],
-                    op: 'replace',
-                    value: nextOrder,
-                }],
-            });
-            // Then add cell_inputs after cell_order is applied
-            await new Promise(resolve => setTimeout(resolve, 50));
-            this.sendMessage('update_notebook', {
-                updates: [{
-                    path: ['cell_inputs', cellId],
-                    op: 'add',
-                    value: {
-                        cell_id: cellId,
-                        code: code,
-                        code_folded: false,
-                    },
-                }],
-            });
+            log(`[BetterPlutoServer] updateCell missing cell_inputs for ${cellId}, using addCellOnly`);
+            // Use addCellOnly which waits for Pluto confirmation
+            await this.addCellOnly(cellId, code);
             return;
         }
 
