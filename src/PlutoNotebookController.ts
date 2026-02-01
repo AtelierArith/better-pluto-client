@@ -610,10 +610,20 @@ class PlutoKernel {
         log(`[BetterPlutoKernel] Cell state update for ${cellId}: ${JSON.stringify(state).slice(0, 200)}`);
         log(`[BetterPlutoKernel] State details for ${cellId}: running=${state.running}, queued=${state.queued}, errored=${state.errored}, runtime=${state.runtime}`);
         this.lastStateUpdateAt.set(cellId, Date.now());
-        const pending = this.pendingStateSync.get(cellId);
-        if (pending) {
-            clearTimeout(pending);
-            this.pendingStateSync.delete(cellId);
+        
+        // Only clear pending state sync if this update will actually end the execution
+        // Otherwise keep the fallback timer running
+        const willEndExecution = (state.running === false && state.queued !== true) ||
+                                 (state.runtime !== undefined && state.runtime >= 0) ||
+                                 (state.errored === true);
+        
+        if (willEndExecution) {
+            const pending = this.pendingStateSync.get(cellId);
+            if (pending) {
+                clearTimeout(pending);
+                this.pendingStateSync.delete(cellId);
+                log(`[BetterPlutoKernel] Cleared pending state sync for ${cellId} (execution will end)`);
+            }
         }
 
         // Track that Pluto knows about this cell
@@ -759,28 +769,31 @@ class PlutoKernel {
 
         // Update execution output if we have an execution
         if (execution) {
-            console.log(`[BetterPlutoKernel] Updating execution for ${cellId} with ${outputs.length} outputs`);
+            log(`[BetterPlutoKernel] Updating execution for ${cellId} with ${outputs.length} outputs`);
             if (outputs.length > 0) {
                 execution.replaceOutput(outputs);
             }
 
             // End execution if cell is done
             // Use runtime or explicit running=false as completion signals
+            // For unchanged cells, Pluto may only send runtime without running=false
             const shouldEnd = (state.running === false && state.queued !== true) ||
-                              (state.runtime !== undefined) ||
+                              (state.runtime !== undefined && state.runtime >= 0) ||
                               (state.errored === true);
 
             if (shouldEnd) {
-                console.log(`[BetterPlutoKernel] Ending execution for ${cellId} (running=${state.running}, runtime=${state.runtime})`);
+                log(`[BetterPlutoKernel] Ending execution for ${cellId} (running=${state.running}, queued=${state.queued}, runtime=${state.runtime}, errored=${state.errored})`);
                 const success = !state.errored;
                 execution.end(success, Date.now());
                 this.cellExecutions.delete(cellId);
                 // Don't delete outputs - keep them for display
+            } else {
+                log(`[BetterPlutoKernel] Execution for ${cellId} not ending yet (running=${state.running}, queued=${state.queued}, runtime=${state.runtime})`);
             }
         } else {
             // No active execution - this might be initial state from Pluto or reactive update
             // Schedule a debounced direct update to collect all state changes
-            console.log(`[BetterPlutoKernel] No execution for ${cellId}, scheduling direct update`);
+            log(`[BetterPlutoKernel] No execution for ${cellId}, scheduling direct update`);
             this.scheduleDirectUpdate(cellId);
         }
     }
@@ -806,7 +819,9 @@ class PlutoKernel {
     }
 
     /**
-     * Request full state if a cell has no updates after run
+     * Request full state if a cell execution is still pending after timeout.
+     * This handles the case where Pluto doesn't send explicit completion signals
+     * for unchanged cells.
      */
     private scheduleStateSync(cellId: string): void {
         const existing = this.pendingStateSync.get(cellId);
@@ -814,24 +829,23 @@ class PlutoKernel {
             clearTimeout(existing);
         }
 
-        const startedAt = Date.now();
         const timeout = setTimeout(async () => {
             this.pendingStateSync.delete(cellId);
             const execution = this.cellExecutions.get(cellId);
-            if (!execution) return;
-            const lastUpdate = this.lastStateUpdateAt.get(cellId) ?? 0;
-            if (lastUpdate >= startedAt) return;
+            if (!execution) {
+                log(`[BetterPlutoKernel] State sync for ${cellId}: no pending execution, skipping`);
+                return;
+            }
 
-            log(`[BetterPlutoKernel] No state update for ${cellId} after run, requesting full state`);
+            log(`[BetterPlutoKernel] State sync for ${cellId}: execution still pending, requesting full state`);
             try {
                 this.server.requestFullState();
                 
                 // Wait a bit for full state to arrive
                 await new Promise(resolve => setTimeout(resolve, 500));
                 
-                // If execution is still pending and we have cached output, end it
-                // This handles the case where Pluto didn't actually run the cell
-                // (code unchanged, cell already up-to-date)
+                // If execution is still pending, end it now
+                // This handles unchanged cells where Pluto skips explicit running=false
                 const stillPending = this.cellExecutions.get(cellId);
                 if (stillPending) {
                     const cachedOutput = this.cellOutputs.get(cellId);
