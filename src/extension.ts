@@ -16,13 +16,36 @@ const NOTEBOOK_TYPE = 'pluto-notebook';
 
 let controller: PlutoNotebookController | undefined;
 
+// Global output channel for Pluto extension
+let outputChannel: vscode.OutputChannel;
+
+/**
+ * Get the Pluto output channel for logging
+ */
+export function getOutputChannel(): vscode.OutputChannel {
+    return outputChannel;
+}
+
+/**
+ * Log a message to the Pluto output channel
+ */
+export function log(message: string): void {
+    const timestamp = new Date().toISOString().substring(11, 23);
+    outputChannel?.appendLine(`[${timestamp}] ${message}`);
+    console.log(`[BetterPluto] ${message}`);
+}
+
 export function activate(context: vscode.ExtensionContext) {
-    console.log('[PlutoExtension] ========================================');
-    console.log('[PlutoExtension] Pluto Notebook extension activating...');
-    console.log('[PlutoExtension] ========================================');
+    // Create output channel first
+    outputChannel = vscode.window.createOutputChannel('BetterPluto');
+    context.subscriptions.push(outputChannel);
+
+    log('========================================');
+    log('Pluto Notebook extension activating...');
+    log('========================================');
 
     // Register notebook serializer
-    console.log('[PlutoExtension] Registering notebook serializer for type:', NOTEBOOK_TYPE);
+    log(`Registering notebook serializer for type: ${NOTEBOOK_TYPE}`);
     const serializer = new PlutoNotebookSerializer();
     context.subscriptions.push(
         vscode.workspace.registerNotebookSerializer(
@@ -33,13 +56,13 @@ export function activate(context: vscode.ExtensionContext) {
             }
         )
     );
-    console.log('[PlutoExtension] Notebook serializer registered');
+    log('Notebook serializer registered');
 
     // Register notebook controller
-    console.log('[PlutoExtension] Registering notebook controller');
+    log('Registering notebook controller');
     controller = new PlutoNotebookController();
     context.subscriptions.push(controller);
-    console.log('[PlutoExtension] Notebook controller registered');
+    log('Notebook controller registered');
 
     // Setup renderer messaging for interactive widgets (Slider, etc.)
     setupRendererMessaging(context);
@@ -65,7 +88,7 @@ export function activate(context: vscode.ExtensionContext) {
             }
             processedNotebooks.add(notebookKey);
 
-            console.log('[PlutoExtension] Notebook editor activated, applying folded states...');
+            log('Notebook editor activated, applying folded states...');
             // Small delay to ensure the editor is fully ready
             await new Promise(resolve => setTimeout(resolve, 100));
             await applyFoldedStates(notebook);
@@ -143,13 +166,13 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('pluto-notebook.saveAndExecute', async () => {
             const notebook = getActiveNotebook();
             if (notebook && controller) {
-                console.log('[PlutoExtension] saveAndExecute: Saving notebook...');
+                log('saveAndExecute: Saving notebook...');
                 // Save the notebook document (this triggers serializer)
                 await notebook.save();
-                console.log('[PlutoExtension] saveAndExecute: Notebook saved, executing modified cells...');
+                log('saveAndExecute: Notebook saved, executing modified cells...');
                 // Then execute modified cells
                 await controller.executeModifiedCells(notebook);
-                console.log('[PlutoExtension] saveAndExecute: Done');
+                log('saveAndExecute: Done');
             }
         })
     );
@@ -208,7 +231,7 @@ export function activate(context: vscode.ExtensionContext) {
     // Command to toggle cell code visibility (fold/unfold)
     context.subscriptions.push(
         vscode.commands.registerCommand('pluto-notebook.toggleCellFolded', async (cellArg?: vscode.NotebookCell | { cell?: vscode.NotebookCell }) => {
-            console.log('[PlutoExtension] toggleCellFolded called with arg:', cellArg);
+            log(`toggleCellFolded called with arg: ${cellArg}`);
 
             // If called from cell title bar, the argument is the cell directly or {cell: ...}
             let targetCell: vscode.NotebookCell | undefined;
@@ -225,7 +248,7 @@ export function activate(context: vscode.ExtensionContext) {
             if (targetCell) {
                 // Update our custom metadata for file saving
                 const newFolded = await toggleCellFolded(targetCell);
-                console.log(`[PlutoExtension] Cell ${targetCell.index} folded: ${newFolded}`);
+                log(`Cell ${targetCell.index} folded: ${newFolded}`);
 
                 // Use VS Code's built-in collapse command for visual effect
                 // First, select the cell
@@ -262,13 +285,14 @@ export function activate(context: vscode.ExtensionContext) {
                 for (let i = cellRange.start; i < cellRange.end; i++) {
                     const cell = notebookEditor.notebook.cellAt(i);
                     const newFolded = await toggleCellFolded(cell);
-                    console.log(`[PlutoExtension] Cell ${i} folded: ${newFolded}`);
+                    log(`Cell ${i} folded: ${newFolded}`);
                 }
             }
         })
     );
 
-    console.log('[PlutoExtension] Extension activation complete');
+    log('Extension activation complete');
+    outputChannel.show(true); // Show output channel (preserveFocus=true)
 }
 
 /**
@@ -292,7 +316,7 @@ function setupRendererMessaging(context: vscode.ExtensionContext) {
 
     const disposable = messaging.onDidReceiveMessage(e => {
         const message = e.message as { type: string; name?: string; value?: unknown; objectid?: string };
-        console.log('[PlutoExtension] Received renderer message:', message);
+        log(`Received renderer message: ${JSON.stringify(message)}`);
 
         if (message.type === 'setBond' && message.name !== undefined) {
             // Find the notebook that contains this editor
@@ -300,7 +324,7 @@ function setupRendererMessaging(context: vscode.ExtensionContext) {
             if (notebook && controller) {
                 controller.setBond(notebook, message.name, message.value);
             } else {
-                console.log('[PlutoExtension] No notebook or controller found');
+                log('No notebook or controller found');
             }
         } else if (message.type === 'showMore' && message.objectid) {
             // Handle "show more" request from tree view
@@ -308,13 +332,13 @@ function setupRendererMessaging(context: vscode.ExtensionContext) {
             if (notebook && controller) {
                 controller.getPublishedObject(notebook, message.objectid);
             } else {
-                console.log('[PlutoExtension] No notebook or controller found for showMore');
+                log('No notebook or controller found for showMore');
             }
         }
     });
 
     context.subscriptions.push(disposable);
-    console.log('[PlutoExtension] Renderer messaging setup complete');
+    log('Renderer messaging setup complete');
 }
 
 /**
@@ -325,7 +349,7 @@ function setupRendererMessaging(context: vscode.ExtensionContext) {
 async function applyFoldedStates(notebook: vscode.NotebookDocument): Promise<void> {
     const notebookEditor = vscode.window.activeNotebookEditor;
     if (!notebookEditor || notebookEditor.notebook !== notebook) {
-        console.log('[PlutoExtension] No active notebook editor for this notebook');
+        log('No active notebook editor for this notebook');
         return;
     }
 
@@ -340,7 +364,7 @@ async function applyFoldedStates(notebook: vscode.NotebookDocument): Promise<voi
         }
     }
 
-    console.log(`[PlutoExtension] Cells to fold: ${cellsToFold.length} cells`, cellsToFold.slice(0, 10));
+    log(`Cells to fold: ${cellsToFold.length} cells [${cellsToFold.slice(0, 10).join(', ')}]`);
 
     if (cellsToFold.length === 0) {
         return;
@@ -357,9 +381,9 @@ async function applyFoldedStates(notebook: vscode.NotebookDocument): Promise<voi
     // Clear selection (select first cell)
     notebookEditor.selections = [new vscode.NotebookRange(0, 1)];
 
-    console.log('[PlutoExtension] Folded states applied using collapse command');
+    log('Folded states applied using collapse command');
 }
 
 export function deactivate() {
-    console.log('Pluto Notebook extension deactivated');
+    log('Pluto Notebook extension deactivated');
 }
