@@ -53,48 +53,68 @@ function setupMathJax(): Promise<void> {
     }
 
     mathJaxLoadPromise = new Promise((resolve) => {
-        if (mathJaxInitialized && getMathJax()?.typeset) {
-            resolve();
-            return;
-        }
-
-        // Configure MathJax before loading the script
-        setMathJaxConfig({
-            options: {
-                ignoreHtmlClass: "no-MathJax",
-                processHtmlClass: "tex",  // Process elements with class "tex"
-            },
-            tex: {
-                inlineMath: [
-                    ["$", "$"],
-                    ["\\(", "\\)"],
-                ],
-            },
-            svg: {
-                fontCache: "global",
-            },
-            startup: {
-                ready: () => {
-                    console.log('[PlutoRenderer] MathJax is ready');
-                    getMathJax()?.startup?.defaultReady?.();
-                    mathJaxInitialized = true;
-                    resolve();
-                }
+        try {
+            if (mathJaxInitialized && getMathJax()?.typeset) {
+                resolve();
+                return;
             }
-        });
 
-        // Load MathJax from CDN
-        const script = document.createElement('script');
-        script.src = 'https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-svg-full.js';
-        script.async = true;
-        script.id = 'MathJax-script';
+            // Check if script already exists
+            if (document.getElementById('MathJax-script')) {
+                console.log('[PlutoRenderer] MathJax script already exists');
+                resolve();
+                return;
+            }
 
-        script.onerror = () => {
-            console.error('[PlutoRenderer] Failed to load MathJax');
+            // Configure MathJax before loading the script
+            setMathJaxConfig({
+                options: {
+                    ignoreHtmlClass: "no-MathJax",
+                    processHtmlClass: "tex",  // Process elements with class "tex"
+                },
+                tex: {
+                    inlineMath: [
+                        ["$", "$"],
+                        ["\\(", "\\)"],
+                    ],
+                },
+                svg: {
+                    fontCache: "global",
+                },
+                startup: {
+                    ready: () => {
+                        console.log('[PlutoRenderer] MathJax is ready');
+                        try {
+                            getMathJax()?.startup?.defaultReady?.();
+                        } catch (e) {
+                            console.warn('[PlutoRenderer] MathJax defaultReady error:', e);
+                        }
+                        mathJaxInitialized = true;
+                        resolve();
+                    }
+                }
+            });
+
+            // Load MathJax from CDN
+            const script = document.createElement('script');
+            script.src = 'https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-svg-full.js';
+            script.async = true;
+            script.id = 'MathJax-script';
+
+            script.onload = () => {
+                console.log('[PlutoRenderer] MathJax script loaded');
+            };
+
+            script.onerror = (e) => {
+                console.error('[PlutoRenderer] Failed to load MathJax:', e);
+                resolve(); // Resolve anyway to not block rendering
+            };
+
+            document.head.appendChild(script);
+        } catch (e) {
+            console.error('[PlutoRenderer] Error setting up MathJax:', e);
             resolve(); // Resolve anyway to not block rendering
-        };
-
-        document.head.appendChild(script);
+        }
     });
 
     return mathJaxLoadPromise;
@@ -137,8 +157,8 @@ async function renderMathInElement(element: HTMLElement): Promise<void> {
  * Activate the renderer
  */
 export function activate(context: RendererContext<void>) {
-    // Start loading MathJax early
-    setupMathJax();
+    // Note: Don't load MathJax early - VS Code webviews have restrictions
+    // MathJax will be loaded on-demand when rendering math content
 
     return {
         renderOutputItem(outputItem: OutputItem, element: HTMLElement) {
