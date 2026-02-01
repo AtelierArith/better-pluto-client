@@ -197,7 +197,7 @@ export function activate(context: RendererContext<void>) {
 /**
  * Execute scripts in the HTML content
  * innerHTML doesn't execute scripts, so we need to do it manually
- * This is needed for Plotly, and other JavaScript-based visualizations
+ * This is needed for Plotly, Clock, and other JavaScript-based visualizations
  */
 async function executeScripts(container: HTMLElement): Promise<void> {
     const scripts = container.querySelectorAll('script');
@@ -226,8 +226,15 @@ async function executeScripts(container: HTMLElement): Promise<void> {
                 oldScript.parentNode?.replaceChild(newScript, oldScript);
             });
         } else {
-            // Inline script - copy content and execute
-            newScript.textContent = oldScript.textContent;
+            // Inline script - wrap with currentScript polyfill for PlutoUI widgets
+            // PlutoUI's Clock.js uses `currentScript ?? this.currentScript` to find its element
+            const wrappedScript = `
+                (function() {
+                    var currentScript = document.currentScript;
+                    ${oldScript.textContent}
+                })();
+            `;
+            newScript.textContent = wrappedScript;
             oldScript.parentNode?.replaceChild(newScript, oldScript);
             console.log(`[PlutoRenderer] Executed inline script (${oldScript.textContent?.length || 0} chars)`);
         }
@@ -270,6 +277,9 @@ function setupInteractiveElements(container: HTMLElement, context: RendererConte
     // Handle Pluto's standard HTML structure for sliders
     // PlutoUI wraps inputs in specific structures
     setupPlutoUISliders(container, context);
+
+    // Handle PlutoUI Clock widgets
+    setupPlutoUIClock(container, context);
 
     // Handle "show more" buttons in tree views
     setupShowMoreButtons(container, context);
@@ -371,6 +381,41 @@ function setupPlutoUISliders(container: HTMLElement, context: RendererContext<vo
             // PlutoUI often includes the variable name in span elements
             const parentHTML = rangeInput.parentElement?.outerHTML || '';
             console.log(`[PlutoRenderer] Slider without bond name, parent HTML:`, parentHTML.slice(0, 200));
+        }
+    });
+}
+
+/**
+ * Setup handlers for PlutoUI Clock widgets
+ * Clock uses a custom <plutoui-clock> element that fires 'input' events
+ */
+function setupPlutoUIClock(container: HTMLElement, context: RendererContext<void>) {
+    const clocks = container.querySelectorAll('plutoui-clock');
+
+    clocks.forEach((clock) => {
+        const clockEl = clock as HTMLElement & { value?: number };
+
+        // Find bond name from parent <bond> element
+        const bondName = findBondNameFromParents(clockEl);
+
+        if (bondName) {
+            console.log(`[PlutoRenderer] Setting up Clock for bond: ${bondName}`);
+
+            // Listen for input events from the clock
+            clockEl.addEventListener('input', () => {
+                const value = clockEl.value ?? 1;
+                console.log(`[PlutoRenderer] Clock ${bondName} ticked: ${value}`);
+
+                if (context.postMessage) {
+                    context.postMessage({
+                        type: 'setBond',
+                        name: bondName,
+                        value: value
+                    });
+                }
+            });
+        } else {
+            console.log(`[PlutoRenderer] Found Clock without bond name`);
         }
     });
 }
