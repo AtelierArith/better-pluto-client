@@ -30,6 +30,8 @@ class PlutoKernel {
     private cellExecutions = new Map<string, vscode.NotebookCellExecution>();
     private cellOutputs = new Map<string, { body?: string; mime?: string; logs?: LogEntry[] }>();
     private pendingDirectUpdates = new Map<string, NodeJS.Timeout>();  // Debounced direct updates
+    private lastStateUpdateAt = new Map<string, number>();  // Track last state update per cell
+    private pendingStateSync = new Map<string, NodeJS.Timeout>();  // Missing update fallback
     private knownCellIds = new Set<string>();  // Cell IDs that Pluto knows about
 
     constructor(
@@ -253,7 +255,8 @@ class PlutoKernel {
 
         // Get cell code (md"""...""" cells already have the wrapper)
         const code = cell.document.getText();
-        console.log(`[BetterPlutoKernel] executeCell called for ${cellId}, code: "${code.slice(0, 50)}..."`);
+        log(`[BetterPlutoKernel] executeCell called for ${cellId}, code: "${code.slice(0, 50)}..."`);
+        log(`[BetterPlutoKernel] executeCell length=${code.length}, language=${cell.document.languageId}`);
 
         // End any existing execution for this cell (prevent duplicates)
         const existingExecution = this.cellExecutions.get(cellId);
@@ -276,11 +279,12 @@ class PlutoKernel {
 
         // Update cell code in Pluto and run
         try {
-            console.log(`[BetterPlutoKernel] Sending updateCell for ${cellId}`);
+            log(`[BetterPlutoKernel] Sending updateCell for ${cellId}`);
             await this.server.updateCell(cellId, code);
-            console.log(`[BetterPlutoKernel] Sending runCell for ${cellId}`);
+            log(`[BetterPlutoKernel] Sending runCell for ${cellId}`);
             await this.server.runCell(cellId);
-            console.log(`[BetterPlutoKernel] runCell completed for ${cellId}`);
+            log(`[BetterPlutoKernel] runCell completed for ${cellId}`);
+            this.scheduleStateSync(cellId);
         } catch (err) {
             console.error('[BetterPlutoKernel] Failed to run cell:', err);
             execution.replaceOutput([
@@ -489,7 +493,14 @@ class PlutoKernel {
      * Handle cell state update from Pluto
      */
     private handleCellState(cellId: string, state: Partial<CellState>): void {
-        console.log(`[BetterPlutoKernel] Cell state update for ${cellId}:`, JSON.stringify(state).slice(0, 200));
+        log(`[BetterPlutoKernel] Cell state update for ${cellId}: ${JSON.stringify(state).slice(0, 200)}`);
+        log(`[BetterPlutoKernel] State details for ${cellId}: running=${state.running}, queued=${state.queued}, errored=${state.errored}, runtime=${state.runtime}`);
+        this.lastStateUpdateAt.set(cellId, Date.now());
+        const pending = this.pendingStateSync.get(cellId);
+        if (pending) {
+            clearTimeout(pending);
+            this.pendingStateSync.delete(cellId);
+        }
 
         // Track that Pluto knows about this cell
         this.knownCellIds.add(cellId);
@@ -633,9 +644,10 @@ class PlutoKernel {
             }
 
             // End execution if cell is done
-            // Check multiple conditions: running=false, or we have runtime (cell completed)
+            // Use runtime or explicit running=false as completion signals
             const shouldEnd = (state.running === false && state.queued !== true) ||
-                              (state.runtime !== undefined && outputs.length > 0);
+                              (state.runtime !== undefined) ||
+                              (state.errored === true);
 
             if (shouldEnd) {
                 console.log(`[BetterPlutoKernel] Ending execution for ${cellId} (running=${state.running}, runtime=${state.runtime})`);
@@ -670,6 +682,34 @@ class PlutoKernel {
         }, 100);
 
         this.pendingDirectUpdates.set(cellId, timeout);
+    }
+
+    /**
+     * Request full state if a cell has no updates after run
+     */
+    private scheduleStateSync(cellId: string): void {
+        const existing = this.pendingStateSync.get(cellId);
+        if (existing) {
+            clearTimeout(existing);
+        }
+
+        const startedAt = Date.now();
+        const timeout = setTimeout(() => {
+            this.pendingStateSync.delete(cellId);
+            const execution = this.cellExecutions.get(cellId);
+            if (!execution) return;
+            const lastUpdate = this.lastStateUpdateAt.get(cellId) ?? 0;
+            if (lastUpdate >= startedAt) return;
+
+            log(`[BetterPlutoKernel] No state update for ${cellId} after run, requesting full state`);
+            try {
+                this.server.requestFullState();
+            } catch (err) {
+                console.error('[BetterPlutoKernel] Failed to request full state:', err);
+            }
+        }, 1500);
+
+        this.pendingStateSync.set(cellId, timeout);
     }
 
     /**
