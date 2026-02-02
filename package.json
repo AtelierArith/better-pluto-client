@@ -119,13 +119,13 @@
       ],
       "notebook/cell/title": [
         {
-          "command": "pluto-notebook.wrapInBeginEnd",
-          "when": "notebookType == pluto-notebook && notebookCellType == code",
+          "command": "pluto-notebook.toggleCellFolded",
+          "when": "notebookType == pluto-notebook",
           "group": "inline@1"
         },
         {
-          "command": "pluto-notebook.toggleCellFolded",
-          "when": "notebookType == pluto-notebook",
+          "command": "pluto-notebook.wrapInBeginEnd",
+          "when": "notebookType == pluto-notebook && notebookCellType == code",
           "group": "inline@2"
         }
       ]
