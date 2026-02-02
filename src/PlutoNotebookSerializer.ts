@@ -110,8 +110,10 @@ export class PlutoNotebookSerializer implements vscode.NotebookSerializer {
 
             // Store cell ID and folded state in metadata
             // Use inputCollapsed to visually hide the cell input when folded
+            // outputCollapsed: false so rendered output (e.g. Markdown "Hi") stays visible
             cellData.metadata = {
-                inputCollapsed: cell.folded,  // VS Code native property to collapse input
+                inputCollapsed: cell.folded,
+                outputCollapsed: false,
                 custom: {
                     id: cellId,
                     folded: cell.folded
@@ -297,6 +299,7 @@ export async function setCellFolded(cell: vscode.NotebookCell, folded: boolean):
     const newMetadata = {
         ...cell.metadata,
         inputCollapsed: folded,  // VS Code native property to collapse input
+        outputCollapsed: false,  // Keep output (e.g. rendered Markdown "Hi") visible when input is folded
         custom: {
             ...(cell.metadata?.custom || {}),
             folded: folded
