@@ -77,7 +77,7 @@ class PlutoKernel {
     }
 
     /**
-     * Run all cells after kernel starts (to ensure initial execution)
+     * Run cells that don't have output yet after kernel starts (Pluto may have already run from file load)
      */
     private async runAllCellsOnStart(): Promise<void> {
         const cellIds: string[] = [];
@@ -89,10 +89,13 @@ class PlutoKernel {
             }
         }
 
-        if (cellIds.length > 0) {
-            log(`[BetterPlutoKernel] Running all ${cellIds.length} cells on startup`);
-            // Run all cells at once using run_multiple_cells
-            await this.server.runMultipleCells(cellIds);
+        // Only run cells that don't have output yet (avoid re-running cells Pluto already ran)
+        const toRun = cellIds.filter(id => !this.cellOutputs.get(id)?.body);
+        if (toRun.length > 0) {
+            log(`[BetterPlutoKernel] Running ${toRun.length} cells without output on startup`);
+            await this.server.runMultipleCells(toRun);
+        } else if (cellIds.length > 0) {
+            log(`[BetterPlutoKernel] All ${cellIds.length} cells already have output, skipping run on startup`);
         }
     }
 
@@ -298,7 +301,7 @@ class PlutoKernel {
 
         // Only clear cached outputs if code has actually changed
         // Pluto may not re-send output for unchanged code (optimization)
-        // If lastCode is not set (cell was executed by Pluto before we tracked it), 
+        // If lastCode is not set (cell was executed by Pluto before we tracked it),
         // preserve existing output and just update lastCode
         const cachedOutput = this.cellOutputs.get(cellId);
         const hasLastCode = cachedOutput && cachedOutput.lastCode !== undefined;
@@ -330,7 +333,7 @@ class PlutoKernel {
         // Update cell code in Pluto and run
         // plutoId will be the actual ID Pluto knows about (may differ from VS Code cellId)
         let plutoId = this.server.getPlutoCellId(cellId);
-        
+
         try {
             if (createdId) {
                 // Make sure the new cell is included in cell_order before updates
@@ -339,17 +342,17 @@ class PlutoKernel {
             // Use server.isKnownCell to check if Pluto knows about this cell
             if (!this.server.isKnownCell(cellId)) {
                 log(`[BetterPlutoKernel] Cell ${cellId} not known to Pluto, saving notebook to trigger auto-reload`);
-                
+
                 // Save the notebook file - this will write the new cell to the file
                 // Pluto's auto_reload_from_file will detect the change and add the cell
                 const notebook = cell.notebook;
                 await notebook.save();
                 log(`[BetterPlutoKernel] Notebook saved, waiting for Pluto to detect new cell`);
-                
+
                 // Wait for Pluto to recognize the cell (via auto-reload)
                 plutoId = await this.server.waitForCellToAppear(cellId, code);
                 log(`[BetterPlutoKernel] Cell recognized by Pluto with ID: ${plutoId}`);
-                
+
                 // Transfer tracking to use Pluto's ID if different
                 if (plutoId !== cellId) {
                     this.cellExecutions.set(plutoId, execution);
@@ -560,7 +563,7 @@ class PlutoKernel {
     private async syncCellsWithPluto(): Promise<void> {
         // Wait a bit for Pluto's initial state to be received via reset_shared_state
         await new Promise(resolve => setTimeout(resolve, 500));
-        
+
         for (let i = 0; i < this.notebook.cellCount; i++) {
             const cell = this.notebook.cellAt(i);
 
@@ -610,13 +613,13 @@ class PlutoKernel {
         log(`[BetterPlutoKernel] Cell state update for ${cellId}: ${JSON.stringify(state).slice(0, 200)}`);
         log(`[BetterPlutoKernel] State details for ${cellId}: running=${state.running}, queued=${state.queued}, errored=${state.errored}, runtime=${state.runtime}`);
         this.lastStateUpdateAt.set(cellId, Date.now());
-        
+
         // Only clear pending state sync if this update will actually end the execution
         // Otherwise keep the fallback timer running
         const willEndExecution = (state.running === false && state.queued !== true) ||
                                  (state.runtime !== undefined && state.runtime >= 0) ||
                                  (state.errored === true);
-        
+
         if (willEndExecution) {
             const pending = this.pendingStateSync.get(cellId);
             if (pending) {
@@ -640,7 +643,7 @@ class PlutoKernel {
                                    isPlutoObjectId(state.output.body);
             // Don't overwrite non-empty output with empty output
             const isEmptyOverwrite = !state.output.body && existingOutput.body;
-            
+
             if (isObjectIdOnly && existingOutput.body && existingOutput.mime === 'application/vnd.pluto.tree+object') {
                 log(`[BetterPlutoKernel] Cell ${cellId} skipping objectid-only update, keeping existing tree data`);
             } else if (isEmptyOverwrite) {
@@ -840,10 +843,10 @@ class PlutoKernel {
             log(`[BetterPlutoKernel] State sync for ${cellId}: execution still pending, requesting full state`);
             try {
                 this.server.requestFullState();
-                
+
                 // Wait a bit for full state to arrive
                 await new Promise(resolve => setTimeout(resolve, 500));
-                
+
                 // If execution is still pending, end it now
                 // This handles unchanged cells where Pluto skips explicit running=false
                 const stillPending = this.cellExecutions.get(cellId);
@@ -851,7 +854,7 @@ class PlutoKernel {
                     const cachedOutput = this.cellOutputs.get(cellId);
                     if (cachedOutput && cachedOutput.body) {
                         log(`[BetterPlutoKernel] Cell ${cellId} has cached output, ending execution (cell was likely already up-to-date)`);
-                        
+
                         // Rebuild and show the cached output
                         const outputs: vscode.NotebookCellOutput[] = [];
                         const mime = cachedOutput.mime || 'text/plain';
