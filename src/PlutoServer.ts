@@ -59,17 +59,23 @@ export class PlutoServer extends EventEmitter {
     // Track known cell IDs and their order
     private knownCellIds = new Set<string>();
     private cellOrder: string[] = [];
-    
+
     // Track cells that are being added but not yet confirmed by Pluto
     // This prevents syncCellOrder from sending cell_order without these cells
     private pendingCellIds = new Set<string>();
 
+    // Cells we already ran updateCell for when they were "detected" (avoids duplicate update_notebook + run)
+    private cellsAlreadyUpdatedOnDetect = new Set<string>();
+
     // Track pending get_published_object requests
     private pendingObjectRequests: Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }> = new Map();
-    
+
     // Map VS Code cell IDs to Pluto cell IDs (for future use if needed)
     private vscodeToPlutoId = new Map<string, string>();
     private plutoToVscodeId = new Map<string, string>();
+
+    // Resolve connectWebSocket as soon as 👋 is received (so kernel is "running" earlier for saveAndExecute)
+    private wsConnectResolve: (() => void) | null = null;
 
     constructor() {
         super();
@@ -205,6 +211,14 @@ export class PlutoServer extends EventEmitter {
             const url = `ws://127.0.0.1:${this.port}/`;
             log(`[BetterPlutoServer] Connecting to ${url}`);
 
+            const connectResolve = () => {
+                if (this.wsConnectResolve) {
+                    this.wsConnectResolve = null;
+                    resolve();
+                }
+            };
+            this.wsConnectResolve = connectResolve;
+
             try {
                 const socket = new WS(url);
                 this.ws = socket as unknown as WebSocket;
@@ -212,17 +226,19 @@ export class PlutoServer extends EventEmitter {
                 socket.on('open', () => {
                     log('[BetterPlutoServer] WebSocket connected');
 
-                    // Send connect message
+                    // Send connect message; resolve() is called when we receive 👋 in handleMessage
                     this.sendMessage('connect', {
                         notebook_id: this.notebookId,
                     });
 
-                    // Request full state
+                    // Fallback: resolve after 500ms if 👋 was not received (e.g. old Pluto)
                     setTimeout(() => {
-                        this.sendMessage('reset_shared_state', {
-                            notebook_id: this.notebookId,
-                        });
-                        resolve();
+                        if (this.wsConnectResolve) {
+                            this.sendMessage('reset_shared_state', {
+                                notebook_id: this.notebookId,
+                            });
+                            this.wsConnectResolve();
+                        }
                     }, 500);
                 });
 
@@ -301,9 +317,16 @@ export class PlutoServer extends EventEmitter {
 
             // Log ALL message types to debug add_cell response
             log(`[BetterPlutoServer] Received message type: ${type}`);
-            
+
             if (type === '👋') {
                 log('[BetterPlutoServer] Got welcome message from Pluto');
+                // Resolve connectWebSocket immediately so kernel.isRunning becomes true earlier (fixes saveAndExecute race)
+                this.sendMessage('reset_shared_state', {
+                    notebook_id: this.notebookId,
+                });
+                if (this.wsConnectResolve) {
+                    this.wsConnectResolve();
+                }
             } else if (type === 'notebook_diff') {
                 const content = message.message as Record<string, unknown>;
                 const patches = content?.patches as Array<{
@@ -973,14 +996,14 @@ export class PlutoServer extends EventEmitter {
     getPlutoCellId(vscodeCellId: string): string {
         return this.vscodeToPlutoId.get(vscodeCellId) || vscodeCellId;
     }
-    
+
     /**
      * Get the VS Code cell ID for a Pluto cell ID (reverse mapping)
      */
     getVscodeCellId(plutoId: string): string {
         return this.plutoToVscodeId.get(plutoId) || plutoId;
     }
-    
+
     /**
      * Wait for a cell to appear in Pluto's state (via auto-reload from file).
      * This is used after saving the notebook file with a new cell.
@@ -988,13 +1011,14 @@ export class PlutoServer extends EventEmitter {
      */
     async waitForCellToAppear(cellId: string, code: string = ''): Promise<string> {
         log(`[BetterPlutoServer] Waiting for cell ${cellId} to appear in Pluto (via file auto-reload)`);
-        
+
         // Mark this cell as pending
         this.pendingCellIds.add(cellId);
-        
+
         return new Promise((resolve) => {
             const startTime = Date.now();
-            
+            let lastRequestAt = 0;
+
             // Check if cell already exists
             if (this.knownCellIds.has(cellId)) {
                 log(`[BetterPlutoServer] Cell ${cellId} already known to Pluto`);
@@ -1002,33 +1026,46 @@ export class PlutoServer extends EventEmitter {
                 resolve(cellId);
                 return;
             }
-            
-            // Poll for the cell to appear
+
+            // Request full state once at start so we see latest after file reload
+            this.requestFullState();
+            lastRequestAt = Date.now();
+
+            // Poll for the cell to appear (Pluto pushes notebook_diff on file reload; we only re-request state occasionally)
             const checkInterval = setInterval(async () => {
                 // Check if cell appeared in knownCellIds
                 if (this.knownCellIds.has(cellId)) {
                     clearInterval(checkInterval);
                     clearTimeout(timeout);
-                    log(`[BetterPlutoServer] Cell ${cellId} detected in Pluto`);
                     this.pendingCellIds.delete(cellId);
-                    
+
+                    // Only update and run once per cell (avoid duplicate update_notebook + run_multiple_cells)
+                    if (this.cellsAlreadyUpdatedOnDetect.has(cellId)) {
+                        log(`[BetterPlutoServer] Cell ${cellId} already updated on detect, resolving only`);
+                        resolve(cellId);
+                        return;
+                    }
+                    this.cellsAlreadyUpdatedOnDetect.add(cellId);
+                    log(`[BetterPlutoServer] Cell ${cellId} detected in Pluto`);
+
                     // Update the cell code to make sure it's correct
                     try {
                         await this.updateCell(cellId, code);
                     } catch (err) {
                         log(`[BetterPlutoServer] Failed to update cell code: ${err}`);
                     }
-                    
+
                     resolve(cellId);
                     return;
                 }
-                
-                // Request full state periodically to help detect new cells
-                if ((Date.now() - startTime) % 1000 < 100) {
+
+                // Re-request full state at most every 2s (avoid flooding; Pluto sends notebook_diff on file save)
+                if (Date.now() - lastRequestAt >= 2000) {
                     this.requestFullState();
+                    lastRequestAt = Date.now();
                 }
             }, 100);
-            
+
             // Timeout after 10 seconds
             const timeout = setTimeout(() => {
                 clearInterval(checkInterval);
@@ -1039,7 +1076,7 @@ export class PlutoServer extends EventEmitter {
             }, 10000);
         });
     }
-    
+
     /**
      * Legacy method - redirects to waitForCellToAppear
      * @deprecated Use waitForCellToAppear instead
