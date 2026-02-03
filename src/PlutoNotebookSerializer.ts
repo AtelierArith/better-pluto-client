@@ -98,11 +98,7 @@ export class PlutoNotebookSerializer implements vscode.NotebookSerializer {
 
             // All cells are Code cells in Pluto.jl (including md"""...""" cells)
             // Markdown cells use md"""...""" syntax which is Julia code
-            // For folded cells, add leading newline so the collapsed preview is empty
-            let code = cell.code;
-            if (cell.folded && !code.startsWith('\n')) {
-                code = '\n' + code;
-            }
+            const code = cell.code;
             const cellData = new vscode.NotebookCellData(
                 vscode.NotebookCellKind.Code,
                 code,
@@ -332,32 +328,6 @@ export async function toggleCellFolded(cell: vscode.NotebookCell): Promise<boole
     const currentFolded = isCellFolded(cell);
     const newFolded = !currentFolded;
 
-    // Get current cell content
-    const currentCode = cell.document.getText();
-
-    const edit = new vscode.WorkspaceEdit();
-
-    if (newFolded) {
-        // When folding: add empty line at the beginning so the preview shows empty
-        if (!currentCode.startsWith('\n')) {
-            const fullRange = new vscode.Range(
-                cell.document.positionAt(0),
-                cell.document.positionAt(currentCode.length)
-            );
-            edit.replace(cell.document.uri, fullRange, '\n' + currentCode);
-        }
-    } else {
-        // When unfolding: remove the leading empty line if it was added
-        if (currentCode.startsWith('\n')) {
-            const fullRange = new vscode.Range(
-                cell.document.positionAt(0),
-                cell.document.positionAt(currentCode.length)
-            );
-            edit.replace(cell.document.uri, fullRange, currentCode.substring(1));
-        }
-    }
-
-    await vscode.workspace.applyEdit(edit);
     await setCellFolded(cell, newFolded);
     return newFolded;
 }
