@@ -4,6 +4,8 @@
 
 Pluto.jl リアクティブノートブックの機能を、ブラウザではなく VS Code の UI で表示・操作するための拡張機能。
 
+**リポジトリ**: https://github.com/AtelierArith/better-pluto-client
+
 ## 目標
 
 - Pluto.jl のバックエンド（Julia サーバー）に接続し、セル実行・リアクティビティを実現
@@ -69,6 +71,10 @@ Pluto.jl リアクティブノートブックの機能を、ブラウザでは�
 - [x] セル折りたたみ（code_folded）対応
 - [x] Plotly/JS ベースのビジュアライゼーション（スクリプト実行対応）
 - [x] 専用出力チャンネル（"BetterPlutoClient"）
+- [x] 内部セル（TOML パッケージメタデータ）のラウンドトリップ保存
+- [x] スマートセル同期（変更されたセルのみ更新送信）
+- [x] 起動時セル実行の改善（VS Code 実行オブジェクト生成）
+- [x] `last_run_timestamp` による実行完了検出
 
 ### Phase 3: 完全な機能
 - [ ] パッケージ管理 UI
@@ -164,6 +170,7 @@ interface NotebookState {
             running: boolean;
             errored: boolean;
             runtime: number;       // 秒
+            last_run_timestamp: number; // 最終実行タイムスタンプ
         }
     };
 
@@ -284,6 +291,8 @@ VSIX を作らずに素早くテストする場合：
 - **JS ビジュアライゼーション**: Plotly 等の JavaScript ベースのプロット表示
 - **エラー表示**: Pluto.jl のスタックトレースを表示
 - **出力チャンネル**: "BetterPlutoClient" チャンネルでサーバーログを確認可能
+- **内部セル保存**: パッケージメタデータ（TOML）のラウンドトリップ保存
+- **スマートセル同期**: 変更されたセルのみサーバーに更新送信
 
 ## ワークスペース設定
 
@@ -293,12 +302,12 @@ VSIX を作らずに素早くテストする場合：
 
 ```
 src/
-├── extension.ts               # エントリーポイント、出力チャンネル管理、レンダラーメッセージング
-├── PlutoNotebookController.ts # ノートブックコントローラー（セル実行、出力レンダリング）
-├── PlutoNotebookSerializer.ts # ノートブックシリアライザー（ファイル読み書き）
-├── PlutoNotebookParser.ts     # .jl ファイルパーサー（Pluto形式解析）
-├── PlutoServer.ts             # Pluto.jl サーバー管理、WebSocket通信
-├── pluto-renderer.ts          # カスタムレンダラー（HTML出力、MathJax、JS実行）
+├── extension.ts               # エントリーポイント、出力チャンネル管理、レンダラーメッセージング (389行)
+├── PlutoNotebookController.ts # ノートブックコントローラー（セル実行、出力レンダリング）(1,954行)
+├── PlutoNotebookSerializer.ts # ノートブックシリアライザー（ファイル読み書き、内部セル保存）(363行)
+├── PlutoNotebookParser.ts     # .jl ファイルパーサー（Pluto形式解析、内部セル抽出）(288行)
+├── PlutoServer.ts             # Pluto.jl サーバー管理、WebSocket通信 (1,157行)
+├── pluto-renderer.ts          # カスタムレンダラー（HTML出力、MathJax、JS実行）(531行)
 └── test/
     └── extension.test.ts      # テストスイート（プレースホルダー）
 
@@ -308,7 +317,7 @@ webpack.config.js              # Webpack 設定（extension + renderer の2エ�
 eslint.config.mjs              # ESLint 設定
 
 samples/
-├── Basic.jl                   # 基本サンプル（変数代入、算術）
+├── Basic.jl                   # 基本サンプル（変数代入、算術、パッケージ管理）
 └── Example.jl                 # 応用サンプル（Plots, PlutoUI, 画像表示）
 
 docs/
@@ -322,11 +331,11 @@ pluto-webview/
 
 | ファイル | 役割 |
 |---------|------|
-| `PlutoNotebookController.ts` | VS Code Notebook API との統合、セル実行管理、出力変換、セル折りたたみ |
-| `PlutoServer.ts` | Pluto.jl プロセスの起動・管理、WebSocket通信、MessagePack encode/decode |
+| `PlutoNotebookController.ts` | VS Code Notebook API との統合、セル実行管理、出力変換、セル折りたたみ、スマートセル同期 |
+| `PlutoServer.ts` | Pluto.jl プロセスの起動・管理、WebSocket通信、MessagePack encode/decode、`last_run_timestamp` 処理 |
 | `pluto-renderer.ts` | HTML出力のレンダリング、MathJax 数式、`@bind` ウィジェット、Plotly/JS 実行 |
-| `PlutoNotebookSerializer.ts` | `.jl` ファイルの読み書き、セルメタデータ管理 |
-| `PlutoNotebookParser.ts` | Pluto.jl 形式の `.jl` ファイル解析、セル抽出 |
+| `PlutoNotebookSerializer.ts` | `.jl` ファイルの読み書き、セルメタデータ管理、内部セル（TOML）保存 |
+| `PlutoNotebookParser.ts` | Pluto.jl 形式の `.jl` ファイル解析、セル抽出、内部セル（`internalCells` Map）収集 |
 | `extension.ts` | 拡張機能の初期化、出力チャンネル、レンダラーメッセージング |
 
 ### 依存パッケージ
@@ -335,3 +344,12 @@ pluto-webview/
 |-----------|------|
 | `@msgpack/msgpack` | Pluto.jl WebSocket メッセージのシリアライゼーション |
 | `ws` | WebSocket クライアント |
+
+### 開発用依存パッケージ（主要）
+
+| パッケージ | バージョン |
+|-----------|----------|
+| `typescript` | ^5.9.3 |
+| `webpack` | ^5.104.1 |
+| `eslint` | ^9.39.2 |
+| `@types/vscode` | ^1.80.0 |
