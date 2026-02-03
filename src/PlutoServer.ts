@@ -64,6 +64,7 @@ export class PlutoServer extends EventEmitter {
     // This prevents syncCellOrder from sending cell_order without these cells
     private pendingCellIds = new Set<string>();
 
+
     // Track pending get_published_object requests
     private pendingObjectRequests: Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }> = new Map();
     
