@@ -5,7 +5,8 @@
 import * as vscode from 'vscode';
 import { PlutoServer, CellState, LogEntry } from './PlutoServer';
 import { getCellId, setCellId } from './PlutoNotebookSerializer';
-import { generateCellId } from './PlutoNotebookParser';
+import { generateCellId, parse as parsePlutoNotebook } from './PlutoNotebookParser';
+import * as fs from 'fs';
 import { log } from './extension';
 
 const NOTEBOOK_TYPE = 'pluto-notebook';
@@ -78,7 +79,10 @@ class PlutoKernel {
     }
 
     /**
-     * Run all cells after kernel starts (to ensure initial execution)
+     * Run all cells after kernel starts (to ensure initial execution).
+     * Creates VS Code execution objects for each cell so that results
+     * from Pluto are rendered through the normal handleCellState path
+     * instead of the unreliable debounced direct-update fallback.
      */
     private async runAllCellsOnStart(): Promise<void> {
         const cellIds: string[] = [];
@@ -87,11 +91,26 @@ class PlutoKernel {
             const cellId = getCellId(cell);
             if (cellId) {
                 cellIds.push(cellId);
+
+                // End any existing execution
+                const existingExecution = this.cellExecutions.get(cellId);
+                if (existingExecution) {
+                    try { existingExecution.end(false, Date.now()); } catch {}
+                }
+
+                // Create execution object so results are properly rendered
+                const execution = this.controller.createNotebookCellExecution(cell);
+                this.cellExecutions.set(cellId, execution);
+                this.cellExecStates.set(cellId, {});
+                this.cellOutputs.delete(cellId);
+
+                execution.start(Date.now());
+                execution.clearOutput();
             }
         }
 
         if (cellIds.length > 0) {
-            log(`[BetterPlutoKernel] Running all ${cellIds.length} cells on startup`);
+            log(`[BetterPlutoKernel] Running all ${cellIds.length} cells on startup (with execution objects)`);
             // Run all cells at once using run_multiple_cells
             await this.server.runMultipleCells(cellIds);
         }
@@ -211,6 +230,10 @@ class PlutoKernel {
             }, async () => {
                 await this.start();
             });
+            // start() already ran all cells with proper execution objects via
+            // runAllCellsOnStart(), so skip re-running to avoid overlapping runs
+            log(`[BetterPlutoKernel] Kernel just started, skipping redundant execution (all cells already running)`);
+            return;
         }
 
         if (cells.length === 1) {
@@ -552,13 +575,24 @@ class PlutoKernel {
 
     /**
      * Sync all cells with Pluto server
-     * Only adds cells that Pluto doesn't know about yet.
-     * Cells already known to Pluto (from file) are not updated to avoid clearing their results.
+     * Adds new cells and updates code only for cells whose code differs
+     * from the file on disk (which Pluto loaded). This avoids unnecessary
+     * update_notebook messages that trigger redundant save+run cycles.
      */
     private async syncCellsWithPluto(): Promise<void> {
         // Wait a bit for Pluto's initial state to be received via reset_shared_state
         await new Promise(resolve => setTimeout(resolve, 500));
-        
+
+        // Read the file to compare VS Code's cell code against what Pluto loaded
+        let fileCells: Map<string, { code: string }> | null = null;
+        try {
+            const fileContent = fs.readFileSync(this.notebook.uri.fsPath, 'utf-8');
+            const parsed = parsePlutoNotebook(fileContent);
+            fileCells = parsed.cells;
+        } catch (err) {
+            log(`[BetterPlutoKernel] Could not read file for sync comparison: ${err}`);
+        }
+
         for (let i = 0; i < this.notebook.cellCount; i++) {
             const cell = this.notebook.cellAt(i);
 
@@ -569,14 +603,20 @@ class PlutoKernel {
                 await setCellId(cell, cellId);
             }
 
-            // Only add cells that Pluto doesn't know about yet
-            // Cells already known (from file loading) should not be updated to preserve their results
+            const code = cell.document.getText();
+
             if (!this.server.isKnownCell(cellId)) {
                 log(`[BetterPlutoKernel] Adding new cell ${cellId} to Pluto`);
-                const code = cell.document.getText();
                 await this.server.addCellOnly(cellId, code);
             } else {
-                log(`[BetterPlutoKernel] Cell ${cellId} already known to Pluto, skipping`);
+                // Only sync if VS Code's code differs from the file (which Pluto loaded)
+                const fileCode = fileCells?.get(cellId)?.code || '';
+                if (code !== fileCode) {
+                    log(`[BetterPlutoKernel] Syncing changed code for cell ${cellId}`);
+                    await this.server.updateCell(cellId, code);
+                } else {
+                    log(`[BetterPlutoKernel] Cell ${cellId} code matches file, skipping sync`);
+                }
             }
         }
     }
@@ -599,6 +639,7 @@ class PlutoKernel {
             this._isRunning = false;
             this.onStateChange();
         });
+
     }
 
     /**

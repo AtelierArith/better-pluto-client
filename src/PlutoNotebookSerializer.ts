@@ -13,6 +13,7 @@ const JULIA_LANGUAGE_ID = 'julia';
 interface PlutoNotebookMetadata {
     version: string;
     preamble: string;
+    internalCells?: Record<string, string>;  // Preserved TOML sections
 }
 
 interface PlutoCellMetadata {
@@ -139,11 +140,16 @@ export class PlutoNotebookSerializer implements vscode.NotebookSerializer {
 
         const notebookData = new vscode.NotebookData(cells);
 
-        // Store notebook metadata
+        // Store notebook metadata (including internal cells for TOML preservation)
+        const internalCellsRecord: Record<string, string> = {};
+        for (const [id, code] of notebook.internalCells) {
+            internalCellsRecord[id] = code;
+        }
         notebookData.metadata = {
             custom: {
                 version: notebook.version,
-                preamble: notebook.preamble
+                preamble: notebook.preamble,
+                internalCells: internalCellsRecord,
             } as PlutoNotebookMetadata
         };
 
@@ -189,12 +195,21 @@ export class PlutoNotebookSerializer implements vscode.NotebookSerializer {
             cellOrder.push(cellId);
         }
 
+        // Restore internal cells from metadata
+        const internalCells = new Map<string, string>();
+        if (metadata.internalCells) {
+            for (const [id, code] of Object.entries(metadata.internalCells)) {
+                internalCells.set(id, code);
+            }
+        }
+
         return {
             version: metadata.version || '0.20.0',
             cells,
             cellOrder,
             foldedCells,
-            preamble: metadata.preamble || ''
+            preamble: metadata.preamble || '',
+            internalCells,
         };
     }
 
