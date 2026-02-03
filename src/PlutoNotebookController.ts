@@ -6,21 +6,11 @@ import * as vscode from 'vscode';
 import { PlutoServer, CellState, LogEntry } from './PlutoServer';
 import { getCellId, setCellId } from './PlutoNotebookSerializer';
 import { generateCellId, parse as parsePlutoNotebook } from './PlutoNotebookParser';
+import { isPlutoObjectId } from './output-utils';
 import * as fs from 'fs';
 import { log } from './extension';
 
 const NOTEBOOK_TYPE = 'pluto-notebook';
-
-/**
- * Check if a string is a Pluto objectid (12-20 character hex string)
- * Pluto uses objectids as placeholders for lazy-loaded data
- */
-function isPlutoObjectId(str: string | undefined | null): boolean {
-    if (!str) {return false;}
-    const trimmed = str.trim();
-    // Objectids are typically 14-16 hex chars, but allow wider range for safety
-    return /^[0-9a-f]{12,20}$/i.test(trimmed);
-}
 
 /**
  * Manages Pluto kernel for a notebook
