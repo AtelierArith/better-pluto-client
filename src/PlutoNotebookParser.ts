@@ -15,6 +15,8 @@ export interface PlutoNotebook {
     cellOrder: string[];
     foldedCells: Set<string>;  // Track which cells are folded
     preamble: string;
+    // Pluto.jl internal cells for package management (preserved during round-trip)
+    internalCells: Map<string, string>;  // cellId -> code content
 }
 
 const CELL_MARKER = /^# ╔═╡ ([0-9a-f-]+)$/;
@@ -47,6 +49,7 @@ export function parse(content: string): PlutoNotebook {
     const cellOrder: string[] = [];
     const foldedCells = new Set<string>();
     const preambleLines: string[] = [];
+    const internalCells = new Map<string, string>();
 
     let currentCellId: string | null = null;
     let currentCellLines: string[] = [];
@@ -68,17 +71,20 @@ export function parse(content: string): PlutoNotebook {
 
         // Cell order section
         if (CELL_ORDER_START.test(line)) {
-            // Save current cell if any (skip internal cells)
-            if (currentCellId && !isPlutoInternalCell(currentCellId)) {
+            // Save current cell if any
+            if (currentCellId) {
                 const cellCode = currentCellLines.join('\n').trim();
-                const cellKind = detectCellKind(cellCode);
-                // Keep md"""...""" syntax as-is (don't extract content)
-                cells.set(currentCellId, {
-                    id: currentCellId,
-                    code: cellCode,
-                    kind: cellKind,
-                    folded: false  // Will be updated later from cell order
-                });
+                if (isPlutoInternalCell(currentCellId)) {
+                    internalCells.set(currentCellId, cellCode);
+                } else {
+                    const cellKind = detectCellKind(cellCode);
+                    cells.set(currentCellId, {
+                        id: currentCellId,
+                        code: cellCode,
+                        kind: cellKind,
+                        folded: false  // Will be updated later from cell order
+                    });
+                }
             }
             inCellOrder = true;
             continue;
@@ -105,17 +111,20 @@ export function parse(content: string): PlutoNotebook {
         // Cell marker
         const cellMatch = line.match(CELL_MARKER);
         if (cellMatch) {
-            // Save previous cell (skip internal cells)
-            if (currentCellId && !isPlutoInternalCell(currentCellId)) {
+            // Save previous cell
+            if (currentCellId) {
                 const cellCode = currentCellLines.join('\n').trim();
-                const cellKind = detectCellKind(cellCode);
-                // Keep md"""...""" syntax as-is (don't extract content)
-                cells.set(currentCellId, {
-                    id: currentCellId,
-                    code: cellCode,
-                    kind: cellKind,
-                    folded: false  // Will be updated later from cell order
-                });
+                if (isPlutoInternalCell(currentCellId)) {
+                    internalCells.set(currentCellId, cellCode);
+                } else {
+                    const cellKind = detectCellKind(cellCode);
+                    cells.set(currentCellId, {
+                        id: currentCellId,
+                        code: cellCode,
+                        kind: cellKind,
+                        folded: false  // Will be updated later from cell order
+                    });
+                }
             } else if (inPreamble) {
                 inPreamble = false;
             }
@@ -133,17 +142,20 @@ export function parse(content: string): PlutoNotebook {
         }
     }
 
-    // Save last cell if not in cell order (skip internal cells)
-    if (currentCellId && !inCellOrder && !isPlutoInternalCell(currentCellId)) {
+    // Save last cell if not in cell order
+    if (currentCellId && !inCellOrder) {
         const cellCode = currentCellLines.join('\n').trim();
-        const cellKind = detectCellKind(cellCode);
-        // Keep md"""...""" syntax as-is (don't extract content)
-        cells.set(currentCellId, {
-            id: currentCellId,
-            code: cellCode,
-            kind: cellKind,
-            folded: false  // Will be updated later from cell order
-        });
+        if (isPlutoInternalCell(currentCellId)) {
+            internalCells.set(currentCellId, cellCode);
+        } else {
+            const cellKind = detectCellKind(cellCode);
+            cells.set(currentCellId, {
+                id: currentCellId,
+                code: cellCode,
+                kind: cellKind,
+                folded: false  // Will be updated later from cell order
+            });
+        }
     }
 
     // Update cells with folded state
@@ -156,7 +168,8 @@ export function parse(content: string): PlutoNotebook {
         cells,
         cellOrder,
         foldedCells,
-        preamble: preambleLines.join('\n').trim()
+        preamble: preambleLines.join('\n').trim(),
+        internalCells,
     };
 }
 
@@ -190,6 +203,15 @@ export function serialize(notebook: PlutoNotebook): string {
         lines.push('');
     }
 
+    // Internal cells (PLUTO_PROJECT_TOML_CONTENTS, PLUTO_MANIFEST_TOML_CONTENTS)
+    if (notebook.internalCells) {
+        for (const [id, code] of notebook.internalCells) {
+            lines.push(`# ╔═╡ ${id}`);
+            lines.push(code);
+            lines.push('');
+        }
+    }
+
     // Cell order
     lines.push('# ╔═╡ Cell order:');
     for (const id of notebook.cellOrder) {
@@ -197,6 +219,12 @@ export function serialize(notebook: PlutoNotebook): string {
         // Use ╟─ for folded cells, ╠═ for visible cells
         const delimiter = cell?.folded ? '# ╟─' : '# ╠═';
         lines.push(`${delimiter}${id}`);
+    }
+    // Internal cells in cell order (always use ╟─ as they are hidden)
+    if (notebook.internalCells) {
+        for (const id of notebook.internalCells.keys()) {
+            lines.push(`# ╟─${id}`);
+        }
     }
 
     return lines.join('\n');
