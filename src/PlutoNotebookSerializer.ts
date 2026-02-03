@@ -94,7 +94,7 @@ export class PlutoNotebookSerializer implements vscode.NotebookSerializer {
         // Create cells in order
         for (const cellId of notebook.cellOrder) {
             const cell = notebook.cells.get(cellId);
-            if (!cell) continue;
+            if (!cell) {continue;}
 
             // All cells are Code cells in Pluto.jl (including md"""...""" cells)
             // Markdown cells use md"""...""" syntax which is Julia code
