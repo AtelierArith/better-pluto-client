@@ -32,6 +32,7 @@ class PlutoKernel {
     private pendingDirectUpdates = new Map<string, NodeJS.Timeout>();  // Debounced direct updates
     private lastStateUpdateAt = new Map<string, number>();  // Track last state update per cell
     private pendingStateSync = new Map<string, NodeJS.Timeout>();  // Missing update fallback
+    private cellExecStates = new Map<string, { running?: boolean; queued?: boolean; errored?: boolean; runtime?: number }>();  // Accumulated execution state for completion detection
     private knownCellIds = new Set<string>();  // Cell IDs that Pluto knows about
 
     constructor(
@@ -117,6 +118,7 @@ class PlutoKernel {
             } catch {}
         }
         this.cellExecutions.clear();
+        this.cellExecStates.clear();
 
         // Clear known cells - they'll be re-discovered when kernel restarts
         this.knownCellIds.clear();
@@ -157,6 +159,7 @@ class PlutoKernel {
             } catch {}
         }
         this.cellExecutions.clear();
+        this.cellExecStates.clear();
     }
 
     /**
@@ -246,6 +249,7 @@ class PlutoKernel {
             // Create execution (for both code and markdown cells)
             const execution = this.controller.createNotebookCellExecution(cell);
             this.cellExecutions.set(cellId, execution);
+            this.cellExecStates.set(cellId, {});
             executions.set(cellId, execution);
 
             // Reset cached outputs so stale values don't leak
@@ -313,6 +317,7 @@ class PlutoKernel {
         // Create execution
         const execution = this.controller.createNotebookCellExecution(cell);
         this.cellExecutions.set(cellId, execution);
+        this.cellExecStates.set(cellId, {});
 
         execution.start(Date.now());
         // Only clear output if code actually changed - preserve existing output for re-runs
@@ -354,6 +359,8 @@ class PlutoKernel {
                 if (plutoId !== cellId) {
                     this.cellExecutions.set(plutoId, execution);
                     this.cellExecutions.delete(cellId);
+                    this.cellExecStates.set(plutoId, this.cellExecStates.get(cellId) || {});
+                    this.cellExecStates.delete(cellId);
                     this.cellOutputs.set(plutoId, this.cellOutputs.get(cellId) || { lastCode: code });
                     this.cellOutputs.delete(cellId);
                 }
@@ -384,7 +391,6 @@ class PlutoKernel {
      * Handle notebook changes (cell added/removed/reordered/modified)
      */
     async handleNotebookChange(e: vscode.NotebookDocumentChangeEvent): Promise<void> {
-        log(`[BetterPlutoKernel] handleNotebookChange: isRunning=${this._isRunning}, contentChanges=${e.contentChanges.length}, cellChanges=${e.cellChanges.length}`);
         if (!this._isRunning) return;
 
         const removedCellIds: string[] = [];
@@ -422,18 +428,10 @@ class PlutoKernel {
         }
 
         // Track cell content changes (for Cmd+S execution)
-        console.log(`[BetterPlutoKernel] cellChanges count: ${e.cellChanges.length}`);
         for (const cellChange of e.cellChanges) {
-            console.log(`[BetterPlutoKernel] cellChange:`, {
-                hasDocument: !!cellChange.document,
-                hasMetadata: !!cellChange.metadata,
-                hasOutputs: !!cellChange.outputs,
-                hasExecutionSummary: !!cellChange.executionSummary
-            });
             if (cellChange.document) {
                 const cellId = getCellId(cellChange.cell);
                 if (cellId) {
-                    console.log(`[BetterPlutoKernel] Cell ${cellId} content changed`);
                     this.modifiedCellIds.add(cellId);
                 }
             }
@@ -610,12 +608,27 @@ class PlutoKernel {
         log(`[BetterPlutoKernel] Cell state update for ${cellId}: ${JSON.stringify(state).slice(0, 200)}`);
         log(`[BetterPlutoKernel] State details for ${cellId}: running=${state.running}, queued=${state.queued}, errored=${state.errored}, runtime=${state.runtime}`);
         this.lastStateUpdateAt.set(cellId, Date.now());
-        
+
+        // Accumulate execution state for completion detection.
+        // Pluto sends partial updates (e.g., only queued=false) in separate events.
+        // For unchanged cells, Pluto may skip running/runtime diffs entirely,
+        // so we accumulate all fields to detect completion from combined state.
+        const execState = this.cellExecStates.get(cellId);
+        if (execState) {
+            if (state.running !== undefined) execState.running = state.running;
+            if (state.queued !== undefined) execState.queued = state.queued;
+            if (state.errored !== undefined) execState.errored = state.errored;
+            if (state.runtime !== undefined) execState.runtime = state.runtime;
+        }
+
+        // Use accumulated state for completion checks when an execution is active
+        const checkState = execState || state;
+
         // Only clear pending state sync if this update will actually end the execution
         // Otherwise keep the fallback timer running
-        const willEndExecution = (state.running === false && state.queued !== true) ||
-                                 (state.runtime !== undefined && state.runtime >= 0) ||
-                                 (state.errored === true);
+        const willEndExecution = (checkState.running === false && checkState.queued !== true) ||
+                                 (checkState.runtime !== undefined && checkState.runtime >= 0) ||
+                                 (checkState.errored === true);
         
         if (willEndExecution) {
             const pending = this.pendingStateSync.get(cellId);
@@ -774,18 +787,20 @@ class PlutoKernel {
                 execution.replaceOutput(outputs);
             }
 
-            // End execution if cell is done
-            // Use runtime or explicit running=false as completion signals
-            // For unchanged cells, Pluto may only send runtime without running=false
-            const shouldEnd = (state.running === false && state.queued !== true) ||
-                              (state.runtime !== undefined && state.runtime >= 0) ||
-                              (state.errored === true);
+            // End execution if cell is done (using accumulated state for robustness)
+            // For unchanged cells, Pluto may skip running/runtime diffs entirely;
+            // the last_run_timestamp handler in PlutoServer emits running=false
+            // which gets accumulated here for reliable completion detection.
+            const shouldEnd = (checkState.running === false && checkState.queued !== true) ||
+                              (checkState.runtime !== undefined && checkState.runtime >= 0) ||
+                              (checkState.errored === true);
 
             if (shouldEnd) {
-                log(`[BetterPlutoKernel] Ending execution for ${cellId} (running=${state.running}, queued=${state.queued}, runtime=${state.runtime}, errored=${state.errored})`);
-                const success = !state.errored;
+                log(`[BetterPlutoKernel] Ending execution for ${cellId} (running=${checkState.running}, queued=${checkState.queued}, runtime=${checkState.runtime}, errored=${checkState.errored})`);
+                const success = !checkState.errored;
                 execution.end(success, Date.now());
                 this.cellExecutions.delete(cellId);
+                this.cellExecStates.delete(cellId);
                 // Don't delete outputs - keep them for display
             } else {
                 log(`[BetterPlutoKernel] Execution for ${cellId} not ending yet (running=${state.running}, queued=${state.queued}, runtime=${state.runtime})`);
@@ -840,18 +855,19 @@ class PlutoKernel {
             log(`[BetterPlutoKernel] State sync for ${cellId}: execution still pending, requesting full state`);
             try {
                 this.server.requestFullState();
-                
+
                 // Wait a bit for full state to arrive
-                await new Promise(resolve => setTimeout(resolve, 500));
-                
+                await new Promise(resolve => setTimeout(resolve, 300));
+
                 // If execution is still pending, end it now
-                // This handles unchanged cells where Pluto skips explicit running=false
+                // This is a safety net - normally last_run_timestamp + accumulated state
+                // should resolve the execution before this fires
                 const stillPending = this.cellExecutions.get(cellId);
                 if (stillPending) {
                     const cachedOutput = this.cellOutputs.get(cellId);
                     if (cachedOutput && cachedOutput.body) {
                         log(`[BetterPlutoKernel] Cell ${cellId} has cached output, ending execution (cell was likely already up-to-date)`);
-                        
+
                         // Rebuild and show the cached output
                         const outputs: vscode.NotebookCellOutput[] = [];
                         const mime = cachedOutput.mime || 'text/plain';
@@ -861,17 +877,19 @@ class PlutoKernel {
                         stillPending.replaceOutput(outputs);
                         stillPending.end(true, Date.now());
                         this.cellExecutions.delete(cellId);
+                        this.cellExecStates.delete(cellId);
                     } else {
                         // No cached output, just end the execution
                         log(`[BetterPlutoKernel] Cell ${cellId} has no output, ending execution`);
                         stillPending.end(true, Date.now());
                         this.cellExecutions.delete(cellId);
+                        this.cellExecStates.delete(cellId);
                     }
                 }
             } catch (err) {
                 console.error('[BetterPlutoKernel] Failed to request full state:', err);
             }
-        }, 1500);
+        }, 500);
 
         this.pendingStateSync.set(cellId, timeout);
     }

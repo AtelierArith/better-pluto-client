@@ -608,8 +608,18 @@ export class PlutoServer extends EventEmitter {
         } else if (subField === 'mime') {
             output.mime = value as string;
             console.log(`[BetterPlutoServer] Cell ${cellId} output.mime: ${output.mime}`);
+        } else if (subField === 'last_run_timestamp') {
+            // last_run_timestamp update indicates cell evaluation is complete.
+            // Critical for unchanged cells where Pluto skips running/runtime diffs
+            // because those fields haven't changed from the previous execution.
+            const state: Partial<CellState> = {
+                cellId,
+                running: false,
+            };
+            this.emit('cellState', cellId, state);
+            return;
         } else {
-            // Skip other subfields like last_run_timestamp, rootassignee, etc.
+            // Skip other subfields like rootassignee, etc.
             return;
         }
 
