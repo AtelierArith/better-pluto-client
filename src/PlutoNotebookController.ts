@@ -16,7 +16,7 @@ const NOTEBOOK_TYPE = 'pluto-notebook';
  * Pluto uses objectids as placeholders for lazy-loaded data
  */
 function isPlutoObjectId(str: string | undefined | null): boolean {
-    if (!str) return false;
+    if (!str) {return false;}
     const trimmed = str.trim();
     // Objectids are typically 14-16 hex chars, but allow wider range for safety
     return /^[0-9a-f]{12,20}$/i.test(trimmed);
@@ -57,7 +57,7 @@ class PlutoKernel {
      * Start the Pluto kernel
      */
     async start(): Promise<void> {
-        if (this._isRunning) return;
+        if (this._isRunning) {return;}
 
         log(`[BetterPlutoKernel] Starting kernel for ${this.notebook.uri.fsPath}`);
 
@@ -429,7 +429,7 @@ class PlutoKernel {
      * Handle notebook changes (cell added/removed/reordered/modified)
      */
     async handleNotebookChange(e: vscode.NotebookDocumentChangeEvent): Promise<void> {
-        if (!this._isRunning) return;
+        if (!this._isRunning) {return;}
 
         const removedCellIds: string[] = [];
         const addedCells: { cellId: string; code: string; index: number }[] = [];
@@ -521,7 +521,7 @@ class PlutoKernel {
      */
     async handleNotebookSave(): Promise<void> {
         console.log(`[BetterPlutoKernel] handleNotebookSave called, isRunning=${this._isRunning}, modifiedCells=${this.modifiedCellIds.size}`);
-        if (!this._isRunning) return;
+        if (!this._isRunning) {return;}
 
         if (this.modifiedCellIds.size === 0) {
             log('[BetterPlutoKernel] No modified cells to execute on save');
@@ -672,10 +672,10 @@ class PlutoKernel {
         // so we accumulate all fields to detect completion from combined state.
         const execState = this.cellExecStates.get(cellId);
         if (execState) {
-            if (state.running !== undefined) execState.running = state.running;
-            if (state.queued !== undefined) execState.queued = state.queued;
-            if (state.errored !== undefined) execState.errored = state.errored;
-            if (state.runtime !== undefined) execState.runtime = state.runtime;
+            if (state.running !== undefined) {execState.running = state.running;}
+            if (state.queued !== undefined) {execState.queued = state.queued;}
+            if (state.errored !== undefined) {execState.errored = state.errored;}
+            if (state.runtime !== undefined) {execState.runtime = state.runtime;}
         }
 
         // Use accumulated state for completion checks when an execution is active
@@ -956,7 +956,7 @@ class PlutoKernel {
      */
     private async executeDirectUpdate(cellId: string): Promise<void> {
         const existingOutput = this.cellOutputs.get(cellId);
-        if (!existingOutput) return;
+        if (!existingOutput) {return;}
 
         // Build outputs from accumulated state
         const outputs: vscode.NotebookCellOutput[] = [];
@@ -1072,7 +1072,7 @@ class PlutoKernel {
             }
         }
 
-        if (outputs.length === 0) return;
+        if (outputs.length === 0) {return;}
 
         // Find the cell by ID
         for (let i = 0; i < this.notebook.cellCount; i++) {
@@ -1386,8 +1386,8 @@ ${treeHtml}`;
                 };
                 const itemsHtml = obj.map((el) => {
                     const moreHtml = renderMoreDirect(el);
-                    if (moreHtml) return moreHtml;
-                    if (!Array.isArray(el) || el.length !== 2) return '';
+                    if (moreHtml) {return moreHtml;}
+                    if (!Array.isArray(el) || el.length !== 2) {return '';}
                     const indexDisplay = `<p-k>${el[0]}</p-k>`;
                     return `<p-r>${indexDisplay}<p-v>${renderMimepair(el[1])}</p-v></p-r>`;
                 }).join('');
@@ -1466,9 +1466,9 @@ ${treeHtml}`;
                 case 'Tuple':
                     itemsHtml = elements.map(r => {
                         const moreHtml = renderMore(r);
-                        if (moreHtml) return moreHtml;
+                        if (moreHtml) {return moreHtml;}
                         const el = r as unknown[];
-                        if (!Array.isArray(el) || el.length !== 2) return '';
+                        if (!Array.isArray(el) || el.length !== 2) {return '';}
                         const indexDisplay = plutoType === 'Set' ? '' : `<p-k>${el[0]}</p-k>`;
                         return `<p-r>${indexDisplay}<p-v>${mimepairOutput(el[1] as unknown[])}</p-v></p-r>`;
                     }).join('');
@@ -1477,9 +1477,9 @@ ${treeHtml}`;
                 case 'Dict':
                     itemsHtml = elements.map(r => {
                         const moreHtml = renderMore(r);
-                        if (moreHtml) return moreHtml;
+                        if (moreHtml) {return moreHtml;}
                         const el = r as unknown[];
-                        if (!Array.isArray(el) || el.length !== 2) return '';
+                        if (!Array.isArray(el) || el.length !== 2) {return '';}
                         return `<p-r><p-k>${mimepairOutput(el[0] as unknown[])}</p-k><p-v>${mimepairOutput(el[1] as unknown[])}</p-v></p-r>`;
                     }).join('');
                     break;
@@ -1488,9 +1488,9 @@ ${treeHtml}`;
                 case 'struct':
                     itemsHtml = elements.map(r => {
                         const moreHtml = renderMore(r);
-                        if (moreHtml) return moreHtml;
+                        if (moreHtml) {return moreHtml;}
                         const el = r as unknown[];
-                        if (!Array.isArray(el) || el.length !== 2) return '';
+                        if (!Array.isArray(el) || el.length !== 2) {return '';}
                         return `<p-r><p-k>${this.escapeHtml(String(el[0]))}</p-k><p-v>${mimepairOutput(el[1] as unknown[])}</p-v></p-r>`;
                     }).join('');
                     break;
@@ -1499,9 +1499,9 @@ ${treeHtml}`;
                     // Default handling for unknown types
                     itemsHtml = elements.map(r => {
                         const moreHtml = renderMore(r);
-                        if (moreHtml) return moreHtml;
+                        if (moreHtml) {return moreHtml;}
                         const el = r as unknown[];
-                        if (!Array.isArray(el) || el.length !== 2) return '';
+                        if (!Array.isArray(el) || el.length !== 2) {return '';}
                         return `<p-r><p-k>${el[0]}</p-k><p-v>${mimepairOutput(el[1] as unknown[])}</p-v></p-r>`;
                     }).join('');
             }
@@ -1536,18 +1536,18 @@ ${treeHtml}`;
      * Extract displayable text from Pluto tree object
      */
     private extractPlutoTree(obj: unknown): string {
-        if (obj === null || obj === undefined) return 'nothing';
-        if (typeof obj === 'string') return obj;
-        if (typeof obj === 'number' || typeof obj === 'boolean') return String(obj);
+        if (obj === null || obj === undefined) {return 'nothing';}
+        if (typeof obj === 'string') {return obj;}
+        if (typeof obj === 'number' || typeof obj === 'boolean') {return String(obj);}
 
-        if (typeof obj !== 'object') return String(obj);
+        if (typeof obj !== 'object') {return String(obj);}
 
         const record = obj as Record<string, unknown>;
 
         // Check if it's a mime/body object (leaf value)
         if ('mime' in record && 'body' in record) {
             const body = record.body;
-            if (typeof body === 'string') return body;
+            if (typeof body === 'string') {return body;}
             return this.extractPlutoTree(body);
         }
 
@@ -1594,20 +1594,20 @@ ${treeHtml}`;
 
             // Format based on type
             const itemsStr = items.join(', ');
-            if (plutoType === 'Tuple') return `(${itemsStr})`;
-            if (plutoType === 'NamedTuple') return `(${itemsStr})`;
-            if (plutoType === 'Dict') return prefix ? `${prefix}(${itemsStr})` : `Dict(${itemsStr})`;
-            if (plutoType === 'Set') return prefix ? `${prefix}([${itemsStr}])` : `Set([${itemsStr}])`;
-            if (plutoType === 'Array') return prefix ? `${prefix}[${itemsStr}]` : `[${itemsStr}]`;
-            if (plutoType === 'struct') return prefix ? `${prefix}(${itemsStr})` : `(${itemsStr})`;
+            if (plutoType === 'Tuple') {return `(${itemsStr})`;}
+            if (plutoType === 'NamedTuple') {return `(${itemsStr})`;}
+            if (plutoType === 'Dict') {return prefix ? `${prefix}(${itemsStr})` : `Dict(${itemsStr})`;}
+            if (plutoType === 'Set') {return prefix ? `${prefix}([${itemsStr}])` : `Set([${itemsStr}])`;}
+            if (plutoType === 'Array') {return prefix ? `${prefix}[${itemsStr}]` : `[${itemsStr}]`;}
+            if (plutoType === 'struct') {return prefix ? `${prefix}(${itemsStr})` : `(${itemsStr})`;}
 
             return prefix ? `${prefix}[${itemsStr}]` : `[${itemsStr}]`;
         }
 
         // Fallback to prefix/type display
-        if (prefix) return prefix;
-        if (plutoType) return `<${plutoType}>`;
-        if ('objectid' in record) return `<object>`;
+        if (prefix) {return prefix;}
+        if (plutoType) {return `<${plutoType}>`;}
+        if ('objectid' in record) {return `<object>`;}
 
         return JSON.stringify(obj).substring(0, 100);
     }
@@ -1619,9 +1619,9 @@ ${treeHtml}`;
      *               [fieldname, [body, mime]] for struct/NamedTuple
      */
     private extractPlutoElement(elem: unknown): string {
-        if (elem === null || elem === undefined) return 'nothing';
-        if (typeof elem === 'string') return elem;
-        if (typeof elem === 'number' || typeof elem === 'boolean') return String(elem);
+        if (elem === null || elem === undefined) {return 'nothing';}
+        if (typeof elem === 'string') {return elem;}
+        if (typeof elem === 'number' || typeof elem === 'boolean') {return String(elem);}
 
         // Handle array element
         if (Array.isArray(elem)) {
@@ -1706,7 +1706,7 @@ ${treeHtml}`;
             }
         }
 
-        if (cellIndex === -1) return;
+        if (cellIndex === -1) {return;}
 
         // Show notification with button
         vscode.window.showWarningMessage(

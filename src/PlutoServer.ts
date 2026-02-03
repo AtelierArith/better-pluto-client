@@ -12,7 +12,7 @@ import { log } from './extension';
  * Check if a string is a Pluto objectid (12-20 character hex string)
  */
 function isPlutoObjectId(str: string | undefined | null): boolean {
-    if (!str) return false;
+    if (!str) {return false;}
     const trimmed = str.trim();
     return /^[0-9a-f]{12,20}$/i.test(trimmed);
 }
@@ -338,7 +338,7 @@ export class PlutoServer extends EventEmitter {
             value?: unknown;
         }>;
 
-        if (!patches) return;
+        if (!patches) {return;}
 
         // Debug: log patch paths (trim to avoid huge output)
         const patchPreview = patches.slice(0, 8).map((patch) => {
@@ -401,10 +401,10 @@ export class PlutoServer extends EventEmitter {
             }
 
             // Only handle cell_results patches
-            if (path[0] !== 'cell_results') continue;
+            if (path[0] !== 'cell_results') {continue;}
 
             const cellId = path[1] as string;
-            if (!cellId) continue;
+            if (!cellId) {continue;}
 
             // Handle full cell result replacement
             if (path.length === 2 && patch.op === 'replace') {
@@ -441,7 +441,7 @@ export class PlutoServer extends EventEmitter {
      * Handle a single cell's full result
      */
     private handleCellResult(cellId: string, result: Record<string, unknown>): void {
-        if (!result) return;
+        if (!result) {return;}
 
         const state: Partial<CellState> = { cellId };
 
@@ -527,7 +527,7 @@ export class PlutoServer extends EventEmitter {
             msg = String(logObj.msg[0] || '');
         }
 
-        if (!msg) return null;
+        if (!msg) {return null;}
 
         const entry = {
             level,
@@ -733,7 +733,7 @@ export class PlutoServer extends EventEmitter {
             }
         }
 
-        if (!dataObj) return null;
+        if (!dataObj) {return null;}
 
         // Extract bytes from the data object
         const allKeys = Object.keys(dataObj);
@@ -741,7 +741,7 @@ export class PlutoServer extends EventEmitter {
 
         console.log(`[BetterPlutoServer] Msgpack binary: ${allKeys.length} total keys, ${keys.length} numeric keys`);
 
-        if (keys.length === 0) return null;
+        if (keys.length === 0) {return null;}
 
         // Check if keys are contiguous
         const maxKey = keys[keys.length - 1];

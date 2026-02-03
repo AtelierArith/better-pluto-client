@@ -28,14 +28,14 @@ interface MathJaxObject {
 
 // Helper to access MathJax on window
 function getMathJax(): MathJaxObject | undefined {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+     
     return (window as any).MathJax as MathJaxObject | undefined;
 }
 
 // Helper to set MathJax config on window
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+ 
 function setMathJaxConfig(config: any): void {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+     
     (window as any).MathJax = config;
 }
 
@@ -430,18 +430,18 @@ function findBondNameFromParents(element: HTMLElement): string | null {
         // Check for <bond def="..."> element
         if (current.tagName.toLowerCase() === 'bond') {
             const def = current.getAttribute('def');
-            if (def) return def;
+            if (def) {return def;}
         }
 
         // Check for data-bond attribute
         const dataBond = current.getAttribute('data-bond');
-        if (dataBond) return dataBond;
+        if (dataBond) {return dataBond;}
 
         // Check for pluto-bond class or similar
         if (current.classList.contains('pluto-bond')) {
             const bondName = current.getAttribute('data-name') ||
                            current.getAttribute('data-var');
-            if (bondName) return bondName;
+            if (bondName) {return bondName;}
         }
 
         current = current.parentElement;
@@ -512,7 +512,7 @@ function setupTreeCollapse(container: HTMLElement) {
             const clickedMore = target.closest('pluto-tree-more');
 
             // Don't toggle if clicking on "show more" button
-            if (clickedMore) return;
+            if (clickedMore) {return;}
 
             // Only toggle if clicking directly on the tree or prefix
             if (clickedTree && (clickedPrefix || target === clickedTree || target.tagName.toLowerCase() === 'pluto-tree')) {
