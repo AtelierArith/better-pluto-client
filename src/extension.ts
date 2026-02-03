@@ -9,7 +9,7 @@
  */
 
 import * as vscode from 'vscode';
-import { PlutoNotebookSerializer, isCellFolded, toggleCellFolded } from './PlutoNotebookSerializer';
+import { PlutoNotebookSerializer, isCellFolded, toggleCellFolded, getCellId } from './PlutoNotebookSerializer';
 import { PlutoNotebookController } from './PlutoNotebookController';
 
 const NOTEBOOK_TYPE = 'pluto-notebook';
@@ -246,6 +246,12 @@ export function activate(context: vscode.ExtensionContext) {
             }
 
             if (targetCell) {
+                // Mark cell as fold-changing to prevent the \n change from triggering re-execution
+                const cellId = getCellId(targetCell);
+                if (cellId && controller) {
+                    controller.markCellAsFoldChanging(targetCell.notebook, cellId);
+                }
+
                 // Update our custom metadata for file saving
                 const newFolded = await toggleCellFolded(targetCell);
                 log(`Cell ${targetCell.index} folded: ${newFolded}`);
@@ -284,6 +290,11 @@ export function activate(context: vscode.ExtensionContext) {
             for (const cellRange of selections) {
                 for (let i = cellRange.start; i < cellRange.end; i++) {
                     const cell = notebookEditor.notebook.cellAt(i);
+                    // Mark cell as fold-changing to prevent the \n change from triggering re-execution
+                    const cellId = getCellId(cell);
+                    if (cellId && controller) {
+                        controller.markCellAsFoldChanging(notebookEditor.notebook, cellId);
+                    }
                     const newFolded = await toggleCellFolded(cell);
                     log(`Cell ${i} folded: ${newFolded}`);
                 }
