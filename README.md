@@ -104,6 +104,10 @@ Or use the command palette:
 
 This extension reads and writes standard Pluto.jl notebook files (`.jl`), which are valid Julia scripts and can be run directly.
 
+## Limitations
+
+- **Collapsed cell preview**: When a cell is folded (code hidden), VS Code shows the first line of code as a preview. This is VS Code's default behavior and cannot be customized. In Pluto.jl browser UI, folded cells show no preview.
+
 ## Known Issues
 
 - First cell execution starts the Pluto kernel (takes ~30-60 seconds on first run)
