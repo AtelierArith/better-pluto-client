@@ -108,6 +108,18 @@ This extension reads and writes standard Pluto.jl notebook files (`.jl`), which 
 
 - First cell execution starts the Pluto kernel (takes ~30-60 seconds on first run)
 
+## Development
+
+### Testing
+
+Run the test suite:
+
+```bash
+yarn test
+```
+
+Unit tests live in `src/test/` and cover the notebook parser, serializer, and Pluto server helpers (see `extension.test.ts`, `pluto-notebook-parser.test.ts`, `pluto-notebook-serializer.test.ts`, `pluto-server.test.ts`).
+
 ## License
 
 MIT
