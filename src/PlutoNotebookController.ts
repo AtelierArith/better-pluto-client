@@ -410,6 +410,21 @@ class PlutoKernel {
     // Track cells that have been modified since last save
     private modifiedCellIds = new Set<string>();
 
+    // Track cells that are being folded/unfolded (changes should be ignored)
+    private foldChangingCellIds = new Set<string>();
+
+    /**
+     * Mark a cell as undergoing fold/unfold change.
+     * Changes to this cell will be ignored in modifiedCellIds.
+     */
+    markCellAsFoldChanging(cellId: string): void {
+        this.foldChangingCellIds.add(cellId);
+        // Auto-clear after a short delay to handle any edge cases
+        setTimeout(() => {
+            this.foldChangingCellIds.delete(cellId);
+        }, 500);
+    }
+
     /**
      * Handle notebook changes (cell added/removed/reordered/modified)
      */
@@ -451,10 +466,11 @@ class PlutoKernel {
         }
 
         // Track cell content changes (for Cmd+S execution)
+        // Skip cells that are being folded/unfolded (their \n changes should not trigger re-execution)
         for (const cellChange of e.cellChanges) {
             if (cellChange.document) {
                 const cellId = getCellId(cellChange.cell);
-                if (cellId) {
+                if (cellId && !this.foldChangingCellIds.has(cellId)) {
                     this.modifiedCellIds.add(cellId);
                 }
             }
@@ -1941,6 +1957,18 @@ export class PlutoNotebookController implements vscode.Disposable {
             }
         }
         vscode.commands.executeCommand('setContext', 'pluto.kernelRunning', anyRunning);
+    }
+
+    /**
+     * Mark a cell as undergoing fold/unfold change.
+     * Changes to this cell will be ignored in modifiedCellIds to prevent spurious re-execution.
+     */
+    markCellAsFoldChanging(notebook: vscode.NotebookDocument, cellId: string): void {
+        const key = notebook.uri.toString();
+        const kernel = this.kernels.get(key);
+        if (kernel) {
+            kernel.markCellAsFoldChanging(cellId);
+        }
     }
 
     dispose(): void {

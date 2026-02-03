@@ -194,7 +194,11 @@ export function serialize(notebook: PlutoNotebook): string {
     for (const [id, cell] of notebook.cells) {
         lines.push(`# ╔═╡ ${id}`);
         // Code is stored as-is (md"""...""" cells already have the wrapper)
-        const code = cell.code;
+        // Remove leading newline if it was added for folding display
+        let code = cell.code;
+        if (cell.folded && code.startsWith('\n')) {
+            code = code.substring(1);
+        }
         lines.push(code);
         lines.push('');
     }
