@@ -11,3 +11,6 @@ vscode-jupyter/
 vscode-marimo/
 julia-vscode/
 .DS_Store
+
+# Working plans (local development only)
+plans/
