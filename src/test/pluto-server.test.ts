@@ -66,4 +66,36 @@ suite('PlutoServer helpers (via private access)', () => {
         assert.strictEqual(updated.body, '{"type":"Array","elements":[[0,["1","text/plain"]]]}');
         assert.strictEqual(updated.mime, 'application/vnd.pluto.tree+object');
     });
+
+    test('extractOutput: rich output with text/html key (TableOfContents-style)', () => {
+        const server = new PlutoServer() as any;
+        const output = { 'text/html': '<script>scrollIntoView</script>', 'text/plain': 'fallback' };
+        const result = server.extractOutput(output);
+        assert.strictEqual(result.mime, 'text/html');
+        assert.strictEqual(result.body, '<script>scrollIntoView</script>');
+    });
+
+    test('extractOutput: rich output prefers text/html over text/plain', () => {
+        const server = new PlutoServer() as any;
+        const output = { 'text/plain': 'plain', 'text/html': '<div>HTML</div>' };
+        const result = server.extractOutput(output);
+        assert.strictEqual(result.mime, 'text/html');
+        assert.strictEqual(result.body, '<div>HTML</div>');
+    });
+
+    test('extractOutput: rich output with only text/plain key', () => {
+        const server = new PlutoServer() as any;
+        const output = { 'text/plain': 'hello world' };
+        const result = server.extractOutput(output);
+        assert.strictEqual(result.mime, 'text/plain');
+        assert.strictEqual(result.body, 'hello world');
+    });
+
+    test('extractOutput: fallback MIME key containing slash', () => {
+        const server = new PlutoServer() as any;
+        const output = { 'application/x-custom': 'custom content' };
+        const result = server.extractOutput(output);
+        assert.strictEqual(result.mime, 'application/x-custom');
+        assert.strictEqual(result.body, 'custom content');
+    });
 });
