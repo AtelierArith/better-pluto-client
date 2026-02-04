@@ -5,6 +5,7 @@
  */
 
 import type { RendererContext, OutputItem } from 'vscode-notebook-renderer';
+import { isTableOfContentsLike } from './pluto-toc-utils';
 
 interface PlutoBondMessage {
     type: 'setBond';
@@ -161,7 +162,7 @@ export function activate(context: RendererContext<void>) {
     // MathJax will be loaded on-demand when rendering math content
 
     return {
-        renderOutputItem(outputItem: OutputItem, element: HTMLElement) {
+        async renderOutputItem(outputItem: OutputItem, element: HTMLElement) {
             const html = outputItem.text();
 
             // Debug log
@@ -182,7 +183,7 @@ export function activate(context: RendererContext<void>) {
             element.appendChild(container);
 
             // Execute any scripts in the HTML (needed for Plotly, etc.)
-            executeScripts(container).catch(err => {
+            await executeScripts(container).catch(err => {
                 console.warn('[PlutoRenderer] Script execution error:', err);
             });
 
@@ -190,8 +191,106 @@ export function activate(context: RendererContext<void>) {
             renderMathInElement(container).catch(err => {
                 console.warn('[PlutoRenderer] Math rendering error:', err);
             });
+
+            // TableOfContents (PlutoUI) output is script-only; the script looks for headings
+            // in the document, but in our cell output we only have this container. Build an
+            // interactive TOC from headings found elsewhere in the same notebook document.
+            if (!hasVisibleContent(container) && isTableOfContentsLike(html)) {
+                const tocEl = renderTableOfContentsFromDocument(container, element);
+                if (tocEl) {
+                    container.appendChild(tocEl);
+                } else {
+                    const placeholder = document.createElement('div');
+                    placeholder.className = 'pluto-toc-placeholder';
+                    placeholder.setAttribute('style', 'color: var(--vscode-descriptionForeground); font-size: 0.9em; padding: 4px 0;');
+                    placeholder.textContent = 'Index (Table of Contents) — 見出しは同じノート内のセルを参照します。';
+                    container.appendChild(placeholder);
+                }
+            }
         }
     };
+}
+
+/**
+ * Find h1/h2/h3 with id in other pluto-output containers in the same document and build a TOC.
+ * Returns a nav element with links, or null if no headings found.
+ */
+function renderTableOfContentsFromDocument(_container: HTMLElement, outputElement: HTMLElement): HTMLElement | null {
+    // Query the document for headings in any pluto-output (excluding script-only TOC cell).
+    // In VS Code notebook webview, all cell outputs are in the same document.
+    const root = outputElement.closest('.notebook-output') ?? outputElement.closest('[data-vscode-notebook-cell-output]') ?? document.body;
+    const headings = root.querySelectorAll('.pluto-output h1[id], .pluto-output h2[id], .pluto-output h3[id]');
+    const items: { id: string; text: string; level: number }[] = [];
+    headings.forEach((el) => {
+        const id = el.getAttribute('id');
+        if (!id) { return; }
+        // Skip if this heading is inside our own container (TOC cell)
+        if (outputElement.contains(el)) { return; }
+        const text = (el.textContent ?? '').trim();
+        if (!text) { return; }
+        const level = el.tagName === 'H1' ? 1 : el.tagName === 'H2' ? 2 : 3;
+        items.push({ id, text, level });
+    });
+    if (items.length === 0) {
+        return null;
+    }
+    const nav = document.createElement('nav');
+    nav.className = 'pluto-toc';
+    nav.setAttribute('aria-label', 'Table of Contents');
+    const label = document.createElement('div');
+    label.textContent = 'Index';
+    label.style.fontWeight = '600';
+    label.style.marginBottom = '0.4em';
+    label.style.fontSize = '0.95em';
+    nav.appendChild(label);
+    const ul = document.createElement('ul');
+    ul.style.margin = '0';
+    ul.style.paddingLeft = '1.2em';
+    ul.style.listStyle = 'none';
+    items.forEach(({ id, text, level }) => {
+        const li = document.createElement('li');
+        li.style.marginTop = level === 1 ? '0.4em' : '0.2em';
+        li.style.marginLeft = `${(level - 1) * 0.8}em`;
+        const a = document.createElement('a');
+        a.href = '#' + encodeURIComponent(id);
+        a.textContent = text;
+        a.style.color = 'var(--vscode-textLink-foreground)';
+        a.style.textDecoration = 'none';
+        a.style.fontSize = level === 1 ? '1em' : level === 2 ? '0.95em' : '0.9em';
+        a.onclick = (e) => {
+            e.preventDefault();
+            const target = document.getElementById(id);
+            if (target) {
+                target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }
+        };
+        li.appendChild(a);
+        ul.appendChild(li);
+    });
+    nav.appendChild(ul);
+    return nav;
+}
+
+/** True if the element has visible content (text or non-script/style nodes with size) */
+function hasVisibleContent(container: HTMLElement): boolean {
+    const walk = (el: Element): boolean => {
+        if (el.nodeType === Node.TEXT_NODE) {
+            return (el.textContent?.trim().length ?? 0) > 0;
+        }
+        if (el.nodeType !== Node.ELEMENT_NODE) { return false; }
+        const tag = (el as Element).tagName.toLowerCase();
+        if (tag === 'script' || tag === 'style') { return false; }
+        if (tag === 'br' || tag === 'hr') { return true; }
+        if ((el as HTMLElement).offsetWidth > 0 && (el as HTMLElement).offsetHeight > 0) { return true; }
+        for (let i = 0; i < el.childNodes.length; i++) {
+            if (walk(el.childNodes[i] as Element)) { return true; }
+        }
+        return false;
+    };
+    for (let i = 0; i < container.childNodes.length; i++) {
+        if (walk(container.childNodes[i] as Element)) { return true; }
+    }
+    return false;
 }
 
 /**
