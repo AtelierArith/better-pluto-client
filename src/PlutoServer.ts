@@ -346,7 +346,17 @@ export class PlutoServer extends EventEmitter {
         });
         log(`[BetterPlutoServer] notebook_diff patch paths: ${patchPreview.join(' | ')}`);
 
-        for (const patch of patches) {
+        // Process in two passes so output (body/mime) is applied before running/last_run_timestamp.
+        // Otherwise the controller may end the execution with 0 outputs and the cell stays empty
+        // (e.g. TableOfContents when Pluto sends replace running before add output.body).
+        const isOutputSubField = (p: typeof patches[0]) => {
+            const path = p.path;
+            return path[0] === 'cell_results' && path.length >= 4 && path[2] === 'output';
+        };
+        const outputPatches = patches.filter(isOutputSubField);
+        const otherPatches = patches.filter((p) => !isOutputSubField(p));
+
+        for (const patch of [...outputPatches, ...otherPatches]) {
             const path = patch.path;
 
             // Handle full state replacement (initial state)
@@ -619,6 +629,27 @@ export class PlutoServer extends EventEmitter {
             };
             this.emit('cellState', cellId, state);
             return;
+        } else if (subField.includes('/')) {
+            // Rich output: patch path like ["cell_results", id, "output", "text/html"]
+            const decodedBody = this.tryDecodeMsgpackBinary(value, subField);
+            let newBody: string | undefined;
+            if (decodedBody !== null) {
+                newBody = decodedBody;
+            } else if (typeof value === 'string') {
+                newBody = value;
+            } else if (value instanceof Uint8Array || ArrayBuffer.isView(value)) {
+                const bytes = value instanceof Uint8Array ? value : new Uint8Array((value as ArrayBufferView).buffer);
+                newBody = subField.startsWith('image/') && subField !== 'image/svg+xml'
+                    ? Buffer.from(bytes).toString('base64')
+                    : Buffer.from(bytes).toString('utf-8');
+            } else if (value != null && typeof value === 'object') {
+                newBody = JSON.stringify(value);
+            }
+            if (newBody !== undefined) {
+                output.mime = subField;
+                output.body = newBody;
+                console.log(`[BetterPlutoServer] Cell ${cellId} output (rich) mime: ${subField}, body length: ${newBody.length}`);
+            }
         } else {
             // Skip other subfields like rootassignee, etc.
             return;
@@ -634,56 +665,112 @@ export class PlutoServer extends EventEmitter {
         this.emit('cellState', cellId, state);
     }
 
+    /** MIME types we can display, in display preference order (e.g. prefer HTML for TableOfContents) */
+    private static readonly RICH_OUTPUT_MIME_ORDER = [
+        'text/html',
+        'application/vnd.pluto.tree+object',
+        'image/svg+xml',
+        'image/png',
+        'image/jpeg',
+        'application/vnd.vega.v5+json',
+        'application/vnd.plotly.v1+json',
+        'text/plain',
+    ];
+
     /**
-     * Extract output body from Pluto output format
+     * Extract output body from Pluto output format.
+     * Supports (1) body+mime shape and (2) rich output with MIME keys (e.g. {"text/html": "<div>..."}).
      */
     private extractOutput(output: Record<string, unknown>): { body: string; mime: string } {
         if (!output || typeof output !== 'object') {
             return { body: '', mime: 'text/plain' };
         }
 
-        let body = '';
-        const mime = (output.mime as string) || 'text/plain';
-
-        if (output.body !== undefined) {
-            // First, try to decode if it's already a msgpack binary format object
-            const decodedBody = this.tryDecodeMsgpackBinary(output.body, mime);
+        // 1) Standard shape: { body, mime }
+        const hasBody = output.body !== undefined;
+        const mimeFromShape = (output.mime as string) || 'text/plain';
+        if (hasBody) {
+            let body = '';
+            const mime = mimeFromShape;
+            const rawBody = output.body;
+            const decodedBody = this.tryDecodeMsgpackBinary(rawBody, mime);
             if (decodedBody !== null) {
                 body = decodedBody;
-            } else if (typeof output.body === 'string') {
-                body = output.body;
-            } else if (output.body instanceof Uint8Array || ArrayBuffer.isView(output.body)) {
-                // Handle binary data (like PNG images)
-                const bytes = output.body instanceof Uint8Array
-                    ? output.body
-                    : new Uint8Array((output.body as ArrayBufferView).buffer);
-                // Convert to base64 for binary images
+            } else if (typeof rawBody === 'string') {
+                body = rawBody;
+            } else if (rawBody instanceof Uint8Array || ArrayBuffer.isView(rawBody)) {
+                const bytes = rawBody instanceof Uint8Array
+                    ? rawBody
+                    : new Uint8Array((rawBody as ArrayBufferView).buffer);
                 if (mime.startsWith('image/') && mime !== 'image/svg+xml') {
                     body = Buffer.from(bytes).toString('base64');
                 } else {
-                    // For text-based formats, decode as UTF-8
                     body = Buffer.from(bytes).toString('utf-8');
                 }
-            } else if (Array.isArray(output.body)) {
-                // Might be a byte array as plain array
-                if (output.body.every((v: unknown) => typeof v === 'number')) {
-                    const bytes = new Uint8Array(output.body as number[]);
+            } else if (Array.isArray(rawBody)) {
+                if (rawBody.every((v: unknown) => typeof v === 'number')) {
+                    const bytes = new Uint8Array(rawBody as number[]);
                     if (mime.startsWith('image/') && mime !== 'image/svg+xml') {
                         body = Buffer.from(bytes).toString('base64');
                     } else {
                         body = Buffer.from(bytes).toString('utf-8');
                     }
                 } else {
-                    body = JSON.stringify(output.body);
+                    body = JSON.stringify(rawBody);
                 }
-            } else if (output.body && typeof output.body === 'object') {
-                // Other object types - stringify as fallback
-                body = JSON.stringify(output.body);
+            } else if (rawBody && typeof rawBody === 'object') {
+                body = JSON.stringify(rawBody);
+            }
+            if (body) {
+                console.log(`[BetterPlutoServer] Extracted output mime: ${mime}, body length: ${body.length}, preview: ${body.slice(0, 50)}`);
+                return { body, mime };
             }
         }
 
-        console.log(`[BetterPlutoServer] Extracted output mime: ${mime}, body length: ${body.length}, preview: ${body.slice(0, 50)}`);
-        return { body, mime };
+        // 2) Rich output: object keys are MIME types (e.g. TableOfContents sends {"text/html": "..."})
+        for (const mime of PlutoServer.RICH_OUTPUT_MIME_ORDER) {
+            const value = output[mime];
+            if (value === undefined) { continue; }
+            let body = '';
+            const decoded = this.tryDecodeMsgpackBinary(value, mime);
+            if (decoded !== null) {
+                body = decoded;
+            } else if (typeof value === 'string') {
+                body = value;
+            } else if (value instanceof Uint8Array || ArrayBuffer.isView(value)) {
+                const bytes = value instanceof Uint8Array ? value : new Uint8Array((value as ArrayBufferView).buffer);
+                if (mime.startsWith('image/') && mime !== 'image/svg+xml') {
+                    body = Buffer.from(bytes).toString('base64');
+                } else {
+                    body = Buffer.from(bytes).toString('utf-8');
+                }
+            } else if (Array.isArray(value) && value.every((v: unknown) => typeof v === 'number')) {
+                const bytes = new Uint8Array(value as number[]);
+                body = mime.startsWith('image/') && mime !== 'image/svg+xml'
+                    ? Buffer.from(bytes).toString('base64')
+                    : Buffer.from(bytes).toString('utf-8');
+            } else if (value != null && typeof value === 'object') {
+                body = JSON.stringify(value);
+            }
+            if (body) {
+                console.log(`[BetterPlutoServer] Extracted rich output mime: ${mime}, body length: ${body.length}, preview: ${body.slice(0, 50)}`);
+                return { body, mime };
+            }
+        }
+
+        // Fallback: any other MIME-like key (contains '/')
+        for (const [key, value] of Object.entries(output)) {
+            if (key === 'body' || key === 'mime') { continue; }
+            if (!key.includes('/')) { continue; }
+            if (typeof value !== 'string') { continue; }
+            if (value.length > 0) {
+                console.log(`[BetterPlutoServer] Extracted output (fallback) mime: ${key}, body length: ${value.length}`);
+                return { body: value, mime: key };
+            }
+        }
+
+        console.log(`[BetterPlutoServer] Extracted output mime: ${mimeFromShape}, body length: 0`);
+        return { body: '', mime: mimeFromShape };
     }
 
     /**
