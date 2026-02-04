@@ -118,7 +118,7 @@ Run the test suite:
 yarn test
 ```
 
-Unit tests live in `src/test/` and cover the notebook parser, serializer, and Pluto server helpers (see `extension.test.ts`, `pluto-notebook-parser.test.ts`, `pluto-notebook-serializer.test.ts`, `pluto-server.test.ts`).
+Unit tests live in `src/test/` and cover the notebook parser, serializer, Pluto server helpers, and renderer TOC utils (see `extension.test.ts`, `pluto-notebook-parser.test.ts`, `pluto-notebook-serializer.test.ts`, `pluto-server.test.ts`, `pluto-toc-utils.test.ts`).
 
 ## License
 
