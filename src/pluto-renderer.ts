@@ -168,6 +168,9 @@ export function activate(context: RendererContext<void>) {
             // Debug log
             console.log('[PlutoRenderer] Rendering HTML output:', html.slice(0, 500));
 
+            // Inject admonition styles (hint, warning, danger, etc.)
+            injectAdmonitionStyles();
+
             // Create a container for the HTML
             const container = document.createElement('div');
             container.className = 'pluto-output';
@@ -209,6 +212,201 @@ export function activate(context: RendererContext<void>) {
             }
         }
     };
+}
+
+/**
+ * Admonition CSS for hint, tip, warning, danger, etc.
+ * Based on Pluto.jl/frontend/editor.css and themes/light.css, dark.css
+ */
+const ADMONITION_CSS = `
+<style class="pluto-admonition-styles">
+/* CSS variables for light/dark mode */
+.pluto-output {
+    --admonition-title-color: white;
+    --jl-message-color: rgb(227, 227, 227);
+    --jl-message-accent-color: rgb(163, 163, 163);
+    --jl-info-color: rgb(214, 227, 244);
+    --jl-info-accent-color: rgb(148, 182, 226);
+    --jl-warn-color: rgb(236, 234, 213);
+    --jl-warn-accent-color: rgb(207, 199, 138);
+    --jl-danger-color: rgb(245, 218, 215);
+    --jl-danger-accent-color: rgb(226, 157, 148);
+}
+
+@media (prefers-color-scheme: dark) {
+    .pluto-output {
+        --admonition-title-color: black;
+        --jl-message-color: rgb(60, 60, 60);
+        --jl-message-accent-color: rgb(120, 120, 120);
+        --jl-info-color: rgb(42, 73, 115);
+        --jl-info-accent-color: rgb(92, 140, 205);
+        --jl-warn-color: rgb(96, 90, 34);
+        --jl-warn-accent-color: rgb(221, 212, 100);
+        --jl-danger-color: rgb(100, 47, 39);
+        --jl-danger-accent-color: rgb(255, 117, 98);
+    }
+}
+
+/* Base admonition styles */
+.pluto-output div.admonition {
+    border-radius: 8px;
+    margin-block-start: 1em;
+    margin-block-end: 1em;
+    padding-left: 0.5rem;
+    padding-right: 0.5rem;
+    background: var(--jl-message-color);
+    border: 5px solid var(--jl-message-accent-color);
+}
+
+.pluto-output div.admonition .admonition-title {
+    font-family: "Vollkorn", Palatino, Georgia, serif;
+    color: var(--admonition-title-color);
+    font-weight: 600;
+    margin-block-end: 0px;
+    padding: 0.3em;
+    font-size: 1.3em;
+    background: var(--jl-message-accent-color);
+    margin: -1px;
+    margin-left: -0.55rem;
+    margin-right: -0.55rem;
+    border-radius: 4px 4px 0 0;
+}
+
+.pluto-output div.admonition .admonition-title ~ * {
+    margin-block-end: 0.5em;
+    margin-block-start: 0.5em;
+    transition: filter linear 0.1s;
+}
+
+/* Note, Info, Hint styles (blue) */
+.pluto-output div.admonition.note,
+.pluto-output div.admonition.info,
+.pluto-output div.admonition.hint {
+    background: var(--jl-info-color);
+    border: 5px solid var(--jl-info-accent-color);
+}
+
+.pluto-output div.admonition.note > .admonition-title,
+.pluto-output div.admonition.info > .admonition-title,
+.pluto-output div.admonition.hint > .admonition-title {
+    background: var(--jl-info-accent-color);
+}
+
+/* Hint blur effect - content is blurred until hover */
+.pluto-output div.admonition.hint > .admonition-title ~ * {
+    filter: blur(0.25em);
+}
+
+.pluto-output div.admonition.hint:hover > .admonition-title ~ *,
+.pluto-output div.admonition.hint:focus-within > .admonition-title ~ * {
+    filter: blur(0em);
+}
+
+/* Tip styles (blue, same as info) */
+.pluto-output div.admonition.tip {
+    background: var(--jl-info-color);
+    border: 5px solid var(--jl-info-accent-color);
+}
+
+.pluto-output div.admonition.tip > .admonition-title {
+    background: var(--jl-info-accent-color);
+}
+
+/* Warning styles (yellow) */
+.pluto-output div.admonition.warning,
+.pluto-output div.admonition.alert-danger {
+    background: var(--jl-warn-color);
+    border: 5px solid var(--jl-warn-accent-color);
+}
+
+.pluto-output div.admonition.warning > .admonition-title,
+.pluto-output div.admonition.alert-danger > .admonition-title {
+    background: var(--jl-warn-accent-color);
+}
+
+/* Danger styles (red) */
+.pluto-output div.admonition.danger {
+    background: var(--jl-danger-color);
+    border: 5px solid var(--jl-danger-accent-color);
+}
+
+.pluto-output div.admonition.danger > .admonition-title {
+    background: var(--jl-danger-accent-color);
+}
+
+/* Correct styles (green) - for PlutoTeachingTools */
+.pluto-output div.admonition.correct {
+    --jl-correct-color: rgb(214, 244, 214);
+    --jl-correct-accent-color: rgb(148, 226, 148);
+    background: var(--jl-correct-color);
+    border: 5px solid var(--jl-correct-accent-color);
+}
+
+@media (prefers-color-scheme: dark) {
+    .pluto-output div.admonition.correct {
+        --jl-correct-color: rgb(34, 80, 34);
+        --jl-correct-accent-color: rgb(100, 180, 100);
+    }
+}
+
+.pluto-output div.admonition.correct > .admonition-title {
+    background: var(--jl-correct-accent-color);
+}
+
+/* Answer styles - same as tip */
+.pluto-output div.admonition.answer {
+    background: var(--jl-info-color);
+    border: 5px solid var(--jl-info-accent-color);
+}
+
+.pluto-output div.admonition.answer > .admonition-title {
+    background: var(--jl-info-accent-color);
+}
+
+/* Question styles (yellow-ish) */
+.pluto-output div.admonition.question {
+    background: var(--jl-warn-color);
+    border: 5px solid var(--jl-warn-accent-color);
+}
+
+.pluto-output div.admonition.question > .admonition-title {
+    background: var(--jl-warn-accent-color);
+}
+
+/* Key concept styles - same as info but could be customized */
+.pluto-output div.admonition.key-concept {
+    background: var(--jl-info-color);
+    border: 5px solid var(--jl-info-accent-color);
+}
+
+.pluto-output div.admonition.key-concept > .admonition-title {
+    background: var(--jl-info-accent-color);
+}
+</style>
+`;
+
+// Flag to track if admonition styles have been injected
+let admonitionStylesInjected = false;
+
+/**
+ * Inject admonition styles into the document if not already present
+ */
+function injectAdmonitionStyles(): void {
+    if (admonitionStylesInjected) {
+        return;
+    }
+    if (document.querySelector('style.pluto-admonition-styles')) {
+        admonitionStylesInjected = true;
+        return;
+    }
+    const styleContainer = document.createElement('div');
+    styleContainer.innerHTML = ADMONITION_CSS;
+    const styleEl = styleContainer.firstElementChild;
+    if (styleEl) {
+        document.head.appendChild(styleEl);
+        admonitionStylesInjected = true;
+        console.log('[PlutoRenderer] Admonition styles injected');
+    }
 }
 
 /**
