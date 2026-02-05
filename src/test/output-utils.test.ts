@@ -1,5 +1,5 @@
 import * as assert from 'assert';
-import { isPlutoObjectId, buildOutputItems, CachedOutput } from '../output-utils';
+import { isPlutoObjectId, buildOutputItems, CachedOutput, escapeHtml, renderStdoutAsHtml } from '../output-utils';
 
 suite('Output Utils - isPlutoObjectId', () => {
     test('returns true for valid 14-char hex objectid', () => {
@@ -277,5 +277,102 @@ suite('Output Utils - Race Condition Scenario', () => {
         assert.strictEqual(items.length, 1);
         assert.strictEqual(items[0].type, 'stdout');
         assert.strictEqual(items[0].content, 'Compiling packages...\n');
+    });
+});
+
+suite('Output Utils - escapeHtml', () => {
+    test('escapes ampersand', () => {
+        assert.strictEqual(escapeHtml('a & b'), 'a &amp; b');
+    });
+
+    test('escapes less than', () => {
+        assert.strictEqual(escapeHtml('a < b'), 'a &lt; b');
+    });
+
+    test('escapes greater than', () => {
+        assert.strictEqual(escapeHtml('a > b'), 'a &gt; b');
+    });
+
+    test('escapes double quotes', () => {
+        assert.strictEqual(escapeHtml('a "b" c'), 'a &quot;b&quot; c');
+    });
+
+    test('escapes single quotes', () => {
+        assert.strictEqual(escapeHtml("a 'b' c"), 'a &#039;b&#039; c');
+    });
+
+    test('escapes all special characters in one string', () => {
+        assert.strictEqual(
+            escapeHtml('<div class="test">a & b\'s</div>'),
+            '&lt;div class=&quot;test&quot;&gt;a &amp; b&#039;s&lt;/div&gt;'
+        );
+    });
+
+    test('returns empty string for empty input', () => {
+        assert.strictEqual(escapeHtml(''), '');
+    });
+
+    test('returns unchanged string with no special characters', () => {
+        assert.strictEqual(escapeHtml('Hello World'), 'Hello World');
+    });
+});
+
+suite('Output Utils - renderStdoutAsHtml', () => {
+    test('returns HTML with pluto-stdout-container class', () => {
+        const html = renderStdoutAsHtml('Hello');
+        assert.ok(html.includes('class="pluto-stdout-container"'));
+    });
+
+    test('returns HTML with pluto-stdout class', () => {
+        const html = renderStdoutAsHtml('Hello');
+        assert.ok(html.includes('class="pluto-stdout"'));
+    });
+
+    test('returns HTML with stdout label', () => {
+        const html = renderStdoutAsHtml('Hello');
+        assert.ok(html.includes('class="pluto-stdout-label"'));
+        assert.ok(html.includes('stdout'));
+    });
+
+    test('escapes HTML characters in stdout content', () => {
+        const html = renderStdoutAsHtml('<script>alert("xss")</script>');
+        assert.ok(html.includes('&lt;script&gt;'));
+        assert.ok(!html.includes('<script>alert'));
+    });
+
+    test('preserves newlines in pre tag', () => {
+        const html = renderStdoutAsHtml('line1\nline2\nline3');
+        assert.ok(html.includes('line1\nline2\nline3'));
+    });
+
+    test('includes CRT terminal styling CSS', () => {
+        const html = renderStdoutAsHtml('test');
+        assert.ok(html.includes('--inner: hsl(36deg 20% 37%)'));
+        assert.ok(html.includes('color: #c0ffab'));
+        assert.ok(html.includes('radial-gradient'));
+    });
+
+    test('includes terminal icon SVG', () => {
+        const html = renderStdoutAsHtml('test');
+        assert.ok(html.includes('<svg'));
+        assert.ok(html.includes('viewBox="0 0 512 512"'));
+    });
+
+    test('wraps content in pre tag', () => {
+        const html = renderStdoutAsHtml('test output');
+        assert.ok(html.includes('<pre class="pluto-stdout">test output</pre>'));
+    });
+
+    test('handles empty string', () => {
+        const html = renderStdoutAsHtml('');
+        assert.ok(html.includes('<pre class="pluto-stdout"></pre>'));
+    });
+
+    test('handles multiline output with special characters', () => {
+        const input = 'Line 1: x > 0\nLine 2: y < 10\nLine 3: "test"';
+        const html = renderStdoutAsHtml(input);
+        assert.ok(html.includes('x &gt; 0'));
+        assert.ok(html.includes('y &lt; 10'));
+        assert.ok(html.includes('&quot;test&quot;'));
     });
 });
