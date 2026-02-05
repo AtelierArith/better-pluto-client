@@ -744,15 +744,17 @@ class PlutoKernel {
         // Build outputs
         const outputs: vscode.NotebookCellOutput[] = [];
 
-        // Add logs (stdout) if present
+        // Add logs (stdout) if present - render as Pluto-style terminal
         if (existingOutput.logs && existingOutput.logs.length > 0) {
             const stdoutLogs = existingOutput.logs
                 .map(log => log.msg)
                 .join('');
 
             if (stdoutLogs) {
+                // Wrap stdout in Pluto-style terminal HTML
+                const stdoutHtml = this.renderStdoutAsHtml(stdoutLogs);
                 outputs.push(new vscode.NotebookCellOutput([
-                    vscode.NotebookCellOutputItem.stdout(stdoutLogs)
+                    vscode.NotebookCellOutputItem.text(stdoutHtml, 'application/vnd.pluto.html+html')
                 ]));
             }
         }
@@ -966,15 +968,17 @@ class PlutoKernel {
     private buildOutputsFromCache(cellId: string, cachedOutput: { body?: string; mime?: string; logs?: LogEntry[] }): vscode.NotebookCellOutput[] {
         const outputs: vscode.NotebookCellOutput[] = [];
 
-        // Add logs (stdout) if present
+        // Add logs (stdout) if present - render as Pluto-style terminal
         if (cachedOutput.logs && cachedOutput.logs.length > 0) {
             const stdoutLogs = cachedOutput.logs
                 .map(logEntry => logEntry.msg)
                 .join('');
 
             if (stdoutLogs) {
+                // Wrap stdout in Pluto-style terminal HTML
+                const stdoutHtml = this.renderStdoutAsHtml(stdoutLogs);
                 outputs.push(new vscode.NotebookCellOutput([
-                    vscode.NotebookCellOutputItem.stdout(stdoutLogs)
+                    vscode.NotebookCellOutputItem.text(stdoutHtml, 'application/vnd.pluto.html+html')
                 ]));
             }
         }
@@ -1534,6 +1538,106 @@ ${treeHtml}`;
             .replace(/>/g, '&gt;')
             .replace(/"/g, '&quot;')
             .replace(/'/g, '&#039;');
+    }
+
+    /**
+     * Render stdout as Pluto-style terminal HTML
+     * Based on Pluto.jl's Logs.js and editor.css styling
+     */
+    private renderStdoutAsHtml(stdout: string): string {
+        const escapedStdout = this.escapeHtml(stdout);
+
+        return `
+<style>
+/* Pluto.jl Stdout Terminal Styling */
+.pluto-stdout-container {
+    display: block;
+    margin: 4px 0;
+}
+
+.pluto-stdout {
+    /* CRT terminal style - based on Pluto.jl editor.css */
+    --inner: hsl(36deg 20% 37%);
+    --outer: hsl(31deg 12% 28%);
+    background: radial-gradient(var(--inner), var(--inner) 20%, var(--outer));
+    color: #c0ffab;
+    border: 4px solid #b7b7b7;
+    text-shadow: 1px 1px 2px #0000005e;
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-family: "JuliaMono", "Fira Code", "Roboto Mono", monospace;
+    font-size: 0.85em;
+    position: relative;
+    overflow: hidden;
+    min-width: 12em;
+    max-width: 100%;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+/* CRT scanline effect overlay */
+.pluto-stdout::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    opacity: 0.15;
+    background: linear-gradient(349deg, #000000, transparent);
+    pointer-events: none;
+}
+
+.pluto-stdout::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    --crt-spacing: 5px;
+    background: linear-gradient(180deg, hsl(37deg 20% 27%), transparent, #1a1a1a);
+    background-size: 100% var(--crt-spacing);
+    opacity: 0.08;
+    pointer-events: none;
+}
+
+/* Terminal icon label */
+.pluto-stdout-label {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 0.75em;
+    color: #888;
+    margin-bottom: 4px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.pluto-stdout-label svg {
+    width: 14px;
+    height: 14px;
+    opacity: 0.7;
+}
+
+/* Light theme adjustments */
+@media (prefers-color-scheme: light) {
+    .pluto-stdout {
+        --inner: hsl(36deg 15% 45%);
+        --outer: hsl(31deg 10% 38%);
+        border-color: #999;
+    }
+}
+</style>
+<div class="pluto-stdout-container">
+    <div class="pluto-stdout-label">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="currentColor">
+            <path d="M448 96H64c-17.67 0-32 14.33-32 32v256c0 17.67 14.33 32 32 32h384c17.67 0 32-14.33 32-32V128c0-17.67-14.33-32-32-32zm8 288c0 4.41-3.59 8-8 8H64c-4.41 0-8-3.59-8-8V128c0-4.41 3.59-8 8-8h384c4.41 0 8 3.59 8 8v256z"/>
+            <path d="M168 168l-88 88 88 88 22.63-22.63L125.25 256l65.38-65.37L168 168zM344 168l-22.63 22.63L386.75 256l-65.38 65.37L344 344l88-88-88-88z"/>
+        </svg>
+        stdout
+    </div>
+    <pre class="pluto-stdout">${escapedStdout}</pre>
+</div>`;
     }
 
     /**
