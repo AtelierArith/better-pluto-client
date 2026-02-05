@@ -212,15 +212,109 @@ export function activate(context: RendererContext<void>) {
 }
 
 /**
- * Find h1/h2/h3 with id in other pluto-output containers in the same document and build a TOC.
- * Returns a nav element with links, or null if no headings found.
+ * PlutoUI-style CSS for TableOfContents
+ * Based on PlutoUI.jl/src/TableOfContents.jl toc_css
+ * Note: Toggle functionality is only for aside mode (fixed sidebar) in PlutoUI.
+ * Since VS Code cell outputs don't support fixed positioning, we use inline mode without toggle.
+ */
+const PLUTOUI_TOC_CSS = `
+<style>
+.plutoui-toc {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen-Sans, Cantarell, "Apple Color Emoji",
+        "Segoe UI Emoji", "Segoe UI Symbol", system-ui, sans-serif;
+    --main-bg-color: var(--vscode-editor-background, #fafafa);
+    --pluto-output-color: var(--vscode-foreground, hsl(0, 0%, 36%));
+    --pluto-output-h-color: var(--vscode-editor-foreground, hsl(0, 0%, 21%));
+    --sidebar-li-active-bg: var(--vscode-list-activeSelectionBackground, rgb(235, 235, 235));
+    color: var(--pluto-output-color);
+    padding: 0.5rem;
+    padding-top: 0em;
+    border-radius: 10px;
+    background-color: var(--main-bg-color);
+    max-width: 300px;
+}
+
+@media (prefers-color-scheme: dark) {
+    .plutoui-toc {
+        --main-bg-color: var(--vscode-editor-background, #303030);
+        --pluto-output-color: var(--vscode-foreground, hsl(0, 0%, 90%));
+        --pluto-output-h-color: var(--vscode-editor-foreground, hsl(0, 0%, 97%));
+        --sidebar-li-active-bg: var(--vscode-list-activeSelectionBackground, rgb(82, 82, 82));
+    }
+}
+
+.plutoui-toc header {
+    display: flex;
+    align-items: center;
+    gap: .3em;
+    font-size: 1.5em;
+    margin-bottom: 0.4em;
+    padding: 0.5rem;
+    margin-left: 0;
+    margin-right: 0;
+    font-weight: bold;
+    position: sticky;
+    top: 0px;
+    background: var(--main-bg-color);
+    z-index: 41;
+}
+
+.plutoui-toc section .toc-row {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    padding: .1em;
+    border-radius: .2em;
+}
+
+.plutoui-toc section .toc-row.H1 {
+    margin-top: 1em;
+}
+
+.plutoui-toc section .toc-row.in-view {
+    background: var(--sidebar-li-active-bg);
+}
+
+.plutoui-toc section a {
+    text-decoration: none;
+    font-weight: normal;
+    color: var(--pluto-output-color);
+}
+.plutoui-toc section a:hover {
+    color: var(--pluto-output-h-color);
+}
+
+.plutoui-toc.indent section a.H1 {
+    font-weight: 700;
+    line-height: 1em;
+}
+
+.plutoui-toc.indent section .after-H2 a { padding-left: 10px; }
+.plutoui-toc.indent section .after-H3 a { padding-left: 20px; }
+.plutoui-toc.indent section .after-H4 a { padding-left: 30px; }
+.plutoui-toc.indent section .after-H5 a { padding-left: 40px; }
+.plutoui-toc.indent section .after-H6 a { padding-left: 50px; }
+
+.plutoui-toc.indent section a.H1 { padding-left: 0px; }
+.plutoui-toc.indent section a.H2 { padding-left: 10px; }
+.plutoui-toc.indent section a.H3 { padding-left: 20px; }
+.plutoui-toc.indent section a.H4 { padding-left: 30px; }
+.plutoui-toc.indent section a.H5 { padding-left: 40px; }
+.plutoui-toc.indent section a.H6 { padding-left: 50px; }
+</style>
+`;
+
+/**
+ * Find h1-h6 with id in other pluto-output containers in the same document and build a TOC.
+ * Returns a nav element with PlutoUI-style links, or null if no headings found.
+ * Based on PlutoUI.jl/src/TableOfContents.jl structure
  */
 function renderTableOfContentsFromDocument(_container: HTMLElement, outputElement: HTMLElement): HTMLElement | null {
     // Query the document for headings in any pluto-output (excluding script-only TOC cell).
     // In VS Code notebook webview, all cell outputs are in the same document.
     const root = outputElement.closest('.notebook-output') ?? outputElement.closest('[data-vscode-notebook-cell-output]') ?? document.body;
-    const headings = root.querySelectorAll('.pluto-output h1[id], .pluto-output h2[id], .pluto-output h3[id]');
-    const items: { id: string; text: string; level: number }[] = [];
+    const headings = root.querySelectorAll('.pluto-output h1[id], .pluto-output h2[id], .pluto-output h3[id], .pluto-output h4[id], .pluto-output h5[id], .pluto-output h6[id]');
+    const items: { id: string; text: string; level: number; element: Element }[] = [];
     headings.forEach((el) => {
         const id = el.getAttribute('id');
         if (!id) { return; }
@@ -228,47 +322,98 @@ function renderTableOfContentsFromDocument(_container: HTMLElement, outputElemen
         if (outputElement.contains(el)) { return; }
         const text = (el.textContent ?? '').trim();
         if (!text) { return; }
-        const level = el.tagName === 'H1' ? 1 : el.tagName === 'H2' ? 2 : 3;
-        items.push({ id, text, level });
+        const level = parseInt(el.tagName.charAt(1), 10);
+        items.push({ id, text, level, element: el });
     });
     if (items.length === 0) {
         return null;
     }
+
+    // Create wrapper with CSS
+    const wrapper = document.createElement('div');
+    wrapper.innerHTML = PLUTOUI_TOC_CSS;
+
+    // Create nav element (PlutoUI-style)
     const nav = document.createElement('nav');
-    nav.className = 'pluto-toc';
+    nav.className = 'plutoui-toc indent';
     nav.setAttribute('aria-label', 'Table of Contents');
-    const label = document.createElement('div');
-    label.textContent = 'Index';
-    label.style.fontWeight = '600';
-    label.style.marginBottom = '0.4em';
-    label.style.fontSize = '0.95em';
-    nav.appendChild(label);
-    const ul = document.createElement('ul');
-    ul.style.margin = '0';
-    ul.style.paddingLeft = '1.2em';
-    ul.style.listStyle = 'none';
-    items.forEach(({ id, text, level }) => {
-        const li = document.createElement('li');
-        li.style.marginTop = level === 1 ? '0.4em' : '0.2em';
-        li.style.marginLeft = `${(level - 1) * 0.8}em`;
+
+    // Header (no toggle in inline mode - toggle is only for aside/fixed sidebar in PlutoUI)
+    const header = document.createElement('header');
+    header.textContent = 'Table of Contents';
+    nav.appendChild(header);
+
+    // Section with toc-rows
+    const section = document.createElement('section');
+    let lastLevel = 'H1';
+
+    // Map for IntersectionObserver tracking
+    const headerToRowMap = new Map<Element, HTMLElement>();
+    const currentlyHighlighted = new Set<HTMLElement>();
+
+    items.forEach(({ id, text, level, element }) => {
+        const levelClass = `H${level}`;
+        const row = document.createElement('div');
+        row.className = `toc-row ${levelClass} after-${lastLevel}`;
+
         const a = document.createElement('a');
+        a.className = levelClass;
         a.href = '#' + encodeURIComponent(id);
+        a.title = text;
         a.textContent = text;
-        a.style.color = 'var(--vscode-textLink-foreground)';
-        a.style.textDecoration = 'none';
-        a.style.fontSize = level === 1 ? '1em' : level === 2 ? '0.95em' : '0.9em';
         a.onclick = (e) => {
             e.preventDefault();
+            history.replaceState(null, '', a.href);
             const target = document.getElementById(id);
             if (target) {
                 target.scrollIntoView({ behavior: 'smooth', block: 'start' });
             }
         };
-        li.appendChild(a);
-        ul.appendChild(li);
+
+        row.appendChild(a);
+        section.appendChild(row);
+
+        headerToRowMap.set(element, row);
+        lastLevel = levelClass;
     });
-    nav.appendChild(ul);
-    return nav;
+
+    nav.appendChild(section);
+    wrapper.appendChild(nav);
+
+    // Set up IntersectionObserver for active section highlighting
+    const intersectionCallback = (entries: IntersectionObserverEntry[]) => {
+        const onTop = entries.filter(ix => ix.intersectionRatio > 0 && ix.intersectionRect.y < (ix.rootBounds?.height ?? 0) / 2);
+        if (onTop.length > 0) {
+            currentlyHighlighted.forEach(el => el.classList.remove('in-view'));
+            currentlyHighlighted.clear();
+            onTop.slice(0, 1).forEach(ix => {
+                const row = headerToRowMap.get(ix.target);
+                if (row) {
+                    row.classList.add('in-view');
+                    currentlyHighlighted.add(row);
+                }
+            });
+        }
+    };
+
+    const observer1 = new IntersectionObserver(intersectionCallback, {
+        root: null,
+        threshold: 1,
+        rootMargin: '-15px',
+    });
+    const observer2 = new IntersectionObserver(intersectionCallback, {
+        root: null,
+        threshold: 1,
+        rootMargin: '15px',
+    });
+
+    // Observe all heading elements
+    items.forEach(({ element }) => {
+        observer1.observe(element);
+        observer2.observe(element);
+    });
+
+    return wrapper;
 }
 
 /** True if the element has visible content (text or non-script/style nodes with size) */
