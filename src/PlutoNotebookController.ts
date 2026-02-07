@@ -1180,7 +1180,12 @@ ${treeHtml}`;
     /**
      * Render a Pluto tree node - identical to Pluto.jl TreeView component
      */
-    private renderPlutoTree(obj: unknown, isRoot: boolean = false, cellId?: string): string {
+    private renderPlutoTree(
+        obj: unknown,
+        isRoot: boolean = false,
+        cellId?: string,
+        currentObjectId?: string
+    ): string {
         if (obj === null || obj === undefined) {
             return '<span>nothing</span>';
         }
@@ -1204,22 +1209,25 @@ ${treeHtml}`;
                 const showMoreAttrs = cellId
                     ? ` data-cellid="${escapeHtml(cellId)}" data-dim="1"`
                     : ' data-dim="1"';
+                const objectIdAttr = currentObjectId
+                    ? ` data-objectid="${escapeHtml(currentObjectId)}"`
+                    : '';
                 const renderMimepair = (pair: unknown): string => {
                     if (!Array.isArray(pair) || pair.length !== 2) {
-                        return this.renderPlutoTree(pair, false, cellId);
+                        return this.renderPlutoTree(pair, false, cellId, currentObjectId);
                     }
                     const [body, mime] = pair;
                     if (mime === 'application/vnd.pluto.tree+object' && body && typeof body === 'object') {
-                        return this.renderPlutoTree(body, false, cellId);
+                        return this.renderPlutoTree(body, false, cellId, currentObjectId);
                     }
                     if (typeof body === 'string') {
                         return `<span>${escapeHtml(body)}</span>`;
                     }
-                    return this.renderPlutoTree(body, false, cellId);
+                    return this.renderPlutoTree(body, false, cellId, currentObjectId);
                 };
                 const renderMoreDirect = (r: unknown): string => {
                     if (r === 'more') {
-                        return `<pluto-tree-more${showMoreAttrs}>show more</pluto-tree-more>`;
+                        return `<pluto-tree-more${objectIdAttr}${showMoreAttrs}>show more</pluto-tree-more>`;
                     }
                     if (r && typeof r === 'object' && !Array.isArray(r)) {
                         const moreObj = r as Record<string, unknown>;
@@ -1248,20 +1256,21 @@ ${treeHtml}`;
         }
 
         const record = obj as Record<string, unknown>;
+        const nodeObjectId = typeof record.objectid === 'string' ? record.objectid : currentObjectId;
 
         // Mimepair output helper
         const mimepairOutput = (pair: unknown): string => {
             if (!Array.isArray(pair) || pair.length !== 2) {
-                return this.renderPlutoTree(pair, false, cellId);
+                return this.renderPlutoTree(pair, false, cellId, nodeObjectId);
             }
             const [body, mime] = pair;
             if (mime === 'application/vnd.pluto.tree+object' && body && typeof body === 'object') {
-                return this.renderPlutoTree(body, false, cellId);
+                return this.renderPlutoTree(body, false, cellId, nodeObjectId);
             }
             if (typeof body === 'string') {
                 return `<span>${escapeHtml(body)}</span>`;
             }
-            return this.renderPlutoTree(body, false, cellId);
+            return this.renderPlutoTree(body, false, cellId, nodeObjectId);
         };
 
         const plutoType = record.type as string | undefined;
@@ -1293,11 +1302,14 @@ ${treeHtml}`;
             const showMoreAttrs = cellId
                 ? ` data-cellid="${escapeHtml(cellId)}" data-dim="1"`
                 : ' data-dim="1"';
+            const objectIdAttr = nodeObjectId
+                ? ` data-objectid="${escapeHtml(nodeObjectId)}"`
+                : '';
 
             // Helper to render "more" marker with objectid
             const renderMore = (r: unknown): string => {
                 if (r === 'more') {
-                    return `<pluto-tree-more${showMoreAttrs}>show more</pluto-tree-more>`;
+                    return `<pluto-tree-more${objectIdAttr}${showMoreAttrs}>show more</pluto-tree-more>`;
                 }
                 if (r && typeof r === 'object' && !Array.isArray(r)) {
                     const obj = r as Record<string, unknown>;
