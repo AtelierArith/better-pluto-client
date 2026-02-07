@@ -6,7 +6,9 @@ import * as vscode from 'vscode';
 import { PlutoServer, CellState, LogEntry } from './PlutoServer';
 import { getCellId, setCellId } from './PlutoNotebookSerializer';
 import { generateCellId, parse as parsePlutoNotebook } from './PlutoNotebookParser';
-import { isPlutoObjectId, renderStdoutAsHtml, escapeHtml } from './output-utils';
+import { isPlutoObjectId, escapeHtml } from './output-utils';
+import { accumulateExecutionState, shouldEndExecution } from './cell-state-machine';
+import { type NotebookOutputAdapter, VscodeNotebookOutputAdapter } from './notebook-output-adapter';
 import * as fs from 'fs';
 import { log } from './extension';
 
@@ -25,6 +27,7 @@ class PlutoKernel {
     private pendingStateSync = new Map<string, NodeJS.Timeout>();  // Missing update fallback
     private cellExecStates = new Map<string, { running?: boolean; queued?: boolean; errored?: boolean; runtime?: number }>();  // Accumulated execution state for completion detection
     private knownCellIds = new Set<string>();  // Cell IDs that Pluto knows about
+    private outputAdapter: NotebookOutputAdapter;
 
     constructor(
         private controller: vscode.NotebookController,
@@ -32,6 +35,11 @@ class PlutoKernel {
         private onStateChange: () => void
     ) {
         this.server = new PlutoServer();
+        this.outputAdapter = new VscodeNotebookOutputAdapter({
+            parseError: (body, mime) => this.parseErrorOutput(body, mime),
+            addErrorHints: (body) => this.addErrorHints(body),
+            renderTreeAsHtml: (body) => this.renderPlutoTreeAsHtml(body),
+        });
         this.setupServerEvents();
     }
 
@@ -681,20 +689,15 @@ class PlutoKernel {
         // so we accumulate all fields to detect completion from combined state.
         const execState = this.cellExecStates.get(cellId);
         if (execState) {
-            if (state.running !== undefined) {execState.running = state.running;}
-            if (state.queued !== undefined) {execState.queued = state.queued;}
-            if (state.errored !== undefined) {execState.errored = state.errored;}
-            if (state.runtime !== undefined) {execState.runtime = state.runtime;}
+            this.cellExecStates.set(cellId, accumulateExecutionState(execState, state));
         }
 
         // Use accumulated state for completion checks when an execution is active
-        const checkState = execState || state;
+        const checkState = this.cellExecStates.get(cellId) || state;
 
         // Only clear pending state sync if this update will actually end the execution
         // Otherwise keep the fallback timer running
-        const willEndExecution = (checkState.running === false && checkState.queued !== true) ||
-                                 (checkState.runtime !== undefined && checkState.runtime >= 0) ||
-                                 (checkState.errored === true);
+        const willEndExecution = shouldEndExecution(checkState);
         
         if (willEndExecution) {
             const pending = this.pendingStateSync.get(cellId);
@@ -741,110 +744,9 @@ class PlutoKernel {
 
         this.cellOutputs.set(cellId, existingOutput);
 
-        // Build outputs
-        const outputs: vscode.NotebookCellOutput[] = [];
-
-        // Add logs (stdout) if present - render as Pluto-style terminal
-        if (existingOutput.logs && existingOutput.logs.length > 0) {
-            const stdoutLogs = existingOutput.logs
-                .map(log => log.msg)
-                .join('');
-
-            if (stdoutLogs) {
-                // Wrap stdout in Pluto-style terminal HTML
-                outputs.push(new vscode.NotebookCellOutput([
-                    vscode.NotebookCellOutputItem.text(renderStdoutAsHtml(stdoutLogs), 'application/vnd.pluto.html+html')
-                ]));
-            }
-        }
-
-        // Add main output if present
-        if (existingOutput.body) {
-            const mime = existingOutput.mime || 'text/plain';
-
-            if (state.errored || mime === 'application/vnd.pluto.stacktrace+object') {
-                // Handle Pluto error stacktrace
-                const errorText = this.parseErrorOutput(existingOutput.body, mime);
-                outputs.push(new vscode.NotebookCellOutput([
-                    vscode.NotebookCellOutputItem.stderr(errorText)
-                ]));
-                // Show wrap suggestion for "extra token" errors
-                if (existingOutput.body.includes('extra token after end of expression')) {
-                    this.showWrapSuggestion(cellId);
-                }
-            } else if (existingOutput.body.includes('extra token after end of expression')) {
-                // Handle "multiple expressions" syntax error
-                const errorText = this.addErrorHints(existingOutput.body);
-                outputs.push(new vscode.NotebookCellOutput([
-                    vscode.NotebookCellOutputItem.stderr(errorText)
-                ]));
-                // Show notification with wrap button
-                this.showWrapSuggestion(cellId);
-            } else if (existingOutput.body.includes('syntax:')) {
-                // Handle other syntax errors
-                outputs.push(new vscode.NotebookCellOutput([
-                    vscode.NotebookCellOutputItem.stderr(existingOutput.body)
-                ]));
-            } else if (mime === 'application/vnd.pluto.tree+object') {
-                // Pluto's tree object format - render as collapsible HTML
-                // Skip if body is just an objectid placeholder (14-16 hex chars)
-                const isObjectIdOnly = isPlutoObjectId(existingOutput.body);
-                if (!isObjectIdOnly) {
-                    const treeHtml = this.renderPlutoTreeAsHtml(existingOutput.body);
-                    // Use custom renderer to enable "show more" messaging
-                    outputs.push(new vscode.NotebookCellOutput([
-                        vscode.NotebookCellOutputItem.text(treeHtml, 'application/vnd.pluto.html+html')
-                    ]));
-                }
-                // If objectid only, don't add output - wait for real data
-            } else if (mime === 'text/html') {
-                // Render HTML - always use custom MIME type for Pluto HTML
-                // This triggers our custom renderer which handles interactive elements and math
-                console.log(`[BetterPlutoKernel] Cell ${cellId} HTML output preview: ${existingOutput.body.slice(0, 200)}`);
-                outputs.push(new vscode.NotebookCellOutput([
-                    vscode.NotebookCellOutputItem.text(existingOutput.body, 'application/vnd.pluto.html+html')
-                ]));
-            } else if (mime === 'image/svg+xml') {
-                // SVG is text-based, render as SVG (like julia-vscode)
-                outputs.push(new vscode.NotebookCellOutput([
-                    vscode.NotebookCellOutputItem.text(existingOutput.body, 'image/svg+xml')
-                ]));
-            } else if (mime === 'image/png' || mime === 'image/jpeg') {
-                // Binary images: decode base64 to Buffer (like julia-vscode)
-                try {
-                    const buffer = Buffer.from(existingOutput.body, 'base64');
-                    outputs.push(new vscode.NotebookCellOutput([
-                        new vscode.NotebookCellOutputItem(buffer, mime)
-                    ]));
-                } catch {
-                    outputs.push(new vscode.NotebookCellOutput([
-                        vscode.NotebookCellOutputItem.text(existingOutput.body, 'text/plain')
-                    ]));
-                }
-            } else if (mime.endsWith('+json')) {
-                // JSON-based formats (Vega, Plotly, etc.)
-                try {
-                    const jsonData = JSON.parse(existingOutput.body);
-                    outputs.push(new vscode.NotebookCellOutput([
-                        vscode.NotebookCellOutputItem.json(jsonData, mime)
-                    ]));
-                } catch {
-                    outputs.push(new vscode.NotebookCellOutput([
-                        vscode.NotebookCellOutputItem.text(existingOutput.body, 'text/plain')
-                    ]));
-                }
-            } else if (mime === 'text/plain') {
-                // For text/plain, ensure proper HTML escaping for display
-                // VS Code's default renderer should handle this, but we ensure it's safe
-                console.log(`[BetterPlutoKernel] Rendering text/plain output for cell ${cellId}, body length: ${existingOutput.body.length}, preview: ${JSON.stringify(existingOutput.body.substring(0, 100))}`);
-                outputs.push(new vscode.NotebookCellOutput([
-                    vscode.NotebookCellOutputItem.text(existingOutput.body, 'text/plain')
-                ]));
-            } else {
-                outputs.push(new vscode.NotebookCellOutput([
-                    vscode.NotebookCellOutputItem.text(existingOutput.body, mime)
-                ]));
-            }
+        const outputs = this.outputAdapter.toNotebookOutputs(cellId, existingOutput);
+        if (existingOutput.body && existingOutput.body.includes('extra token after end of expression')) {
+            this.showWrapSuggestion(cellId);
         }
 
         // Update execution output if we have an execution
@@ -858,9 +760,7 @@ class PlutoKernel {
             // For unchanged cells, Pluto may skip running/runtime diffs entirely;
             // the last_run_timestamp handler in PlutoServer emits running=false
             // which gets accumulated here for reliable completion detection.
-            const shouldEnd = (checkState.running === false && checkState.queued !== true) ||
-                              (checkState.runtime !== undefined && checkState.runtime >= 0) ||
-                              (checkState.errored === true);
+            const shouldEnd = shouldEndExecution(checkState);
 
             if (shouldEnd) {
                 log(`[BetterPlutoKernel] Ending execution for ${cellId} (running=${checkState.running}, queued=${checkState.queued}, runtime=${checkState.runtime}, errored=${checkState.errored})`);
@@ -936,11 +836,7 @@ class PlutoKernel {
                         log(`[BetterPlutoKernel] Cell ${cellId} has cached output, ending execution (cell was likely already up-to-date)`);
 
                         // Rebuild and show the cached output
-                        const outputs: vscode.NotebookCellOutput[] = [];
-                        const mime = cachedOutput.mime || 'text/plain';
-                        outputs.push(new vscode.NotebookCellOutput([
-                            vscode.NotebookCellOutputItem.text(cachedOutput.body, mime)
-                        ]));
+                        const outputs = this.buildOutputsFromCache(cellId, cachedOutput);
                         stillPending.replaceOutput(outputs);
                         stillPending.end(true, Date.now());
                         this.cellExecutions.delete(cellId);
@@ -965,97 +861,7 @@ class PlutoKernel {
      * Build VS Code notebook outputs from cached output data
      */
     private buildOutputsFromCache(cellId: string, cachedOutput: { body?: string; mime?: string; logs?: LogEntry[] }): vscode.NotebookCellOutput[] {
-        const outputs: vscode.NotebookCellOutput[] = [];
-
-        // Add logs (stdout) if present - render as Pluto-style terminal
-        if (cachedOutput.logs && cachedOutput.logs.length > 0) {
-            const stdoutLogs = cachedOutput.logs
-                .map(logEntry => logEntry.msg)
-                .join('');
-
-            if (stdoutLogs) {
-                // Wrap stdout in Pluto-style terminal HTML
-                outputs.push(new vscode.NotebookCellOutput([
-                    vscode.NotebookCellOutputItem.text(renderStdoutAsHtml(stdoutLogs), 'application/vnd.pluto.html+html')
-                ]));
-            }
-        }
-
-        // Add main output if present
-        if (cachedOutput.body) {
-            const mime = cachedOutput.mime || 'text/plain';
-
-            if (mime === 'application/vnd.pluto.stacktrace+object') {
-                const errorText = this.parseErrorOutput(cachedOutput.body, mime);
-                outputs.push(new vscode.NotebookCellOutput([
-                    vscode.NotebookCellOutputItem.stderr(errorText)
-                ]));
-            } else if (cachedOutput.body.includes('extra token after end of expression')) {
-                const errorText = this.addErrorHints(cachedOutput.body);
-                outputs.push(new vscode.NotebookCellOutput([
-                    vscode.NotebookCellOutputItem.stderr(errorText)
-                ]));
-            } else if (cachedOutput.body.includes('syntax:')) {
-                outputs.push(new vscode.NotebookCellOutput([
-                    vscode.NotebookCellOutputItem.stderr(cachedOutput.body)
-                ]));
-            } else if (mime === 'application/vnd.pluto.tree+object') {
-                const isObjectIdOnly = isPlutoObjectId(cachedOutput.body);
-                if (!isObjectIdOnly) {
-                    const treeHtml = this.renderPlutoTreeAsHtml(cachedOutput.body);
-                    outputs.push(new vscode.NotebookCellOutput([
-                        vscode.NotebookCellOutputItem.text(treeHtml, 'application/vnd.pluto.html+html')
-                    ]));
-                }
-            } else if (mime === 'text/html') {
-                log(`[BetterPlutoKernel] Cell ${cellId} HTML output (cached) preview: ${cachedOutput.body.slice(0, 200)}`);
-                outputs.push(new vscode.NotebookCellOutput([
-                    vscode.NotebookCellOutputItem.text(cachedOutput.body, 'application/vnd.pluto.html+html')
-                ]));
-            } else if (mime === 'image/svg+xml') {
-                outputs.push(new vscode.NotebookCellOutput([
-                    vscode.NotebookCellOutputItem.text(cachedOutput.body, 'image/svg+xml')
-                ]));
-            } else if (mime === 'image/png' || mime === 'image/jpeg') {
-                try {
-                    const buffer = Buffer.from(cachedOutput.body, 'base64');
-                    outputs.push(new vscode.NotebookCellOutput([
-                        new vscode.NotebookCellOutputItem(buffer, mime)
-                    ]));
-                } catch {
-                    outputs.push(new vscode.NotebookCellOutput([
-                        vscode.NotebookCellOutputItem.text(cachedOutput.body, 'text/plain')
-                    ]));
-                }
-            } else if (mime.endsWith('+json')) {
-                try {
-                    const jsonData = JSON.parse(cachedOutput.body);
-                    outputs.push(new vscode.NotebookCellOutput([
-                        vscode.NotebookCellOutputItem.json(jsonData, mime)
-                    ]));
-                } catch {
-                    outputs.push(new vscode.NotebookCellOutput([
-                        vscode.NotebookCellOutputItem.text(cachedOutput.body, 'text/plain')
-                    ]));
-                }
-            } else if (mime === 'text/plain') {
-                if (cachedOutput.body.trim().startsWith('<')) {
-                    outputs.push(new vscode.NotebookCellOutput([
-                        vscode.NotebookCellOutputItem.text(cachedOutput.body, 'application/vnd.pluto.html+html')
-                    ]));
-                } else {
-                    outputs.push(new vscode.NotebookCellOutput([
-                        vscode.NotebookCellOutputItem.text(cachedOutput.body, 'text/plain')
-                    ]));
-                }
-            } else {
-                outputs.push(new vscode.NotebookCellOutput([
-                    vscode.NotebookCellOutputItem.text(cachedOutput.body, mime)
-                ]));
-            }
-        }
-
-        return outputs;
+        return this.outputAdapter.toNotebookOutputs(cellId, cachedOutput);
     }
 
     /**
