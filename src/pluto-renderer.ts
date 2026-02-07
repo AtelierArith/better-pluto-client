@@ -15,7 +15,9 @@ interface PlutoBondMessage {
 
 interface PlutoShowMoreMessage {
     type: 'showMore';
+    cellId: string;
     objectid: string;
+    dim: number;
 }
 
 // MathJax is loaded dynamically from CDN
@@ -933,15 +935,17 @@ function setupShowMoreButtons(container: HTMLElement, context: RendererContext<v
 
     moreButtons.forEach((button) => {
         const moreBtn = button as HTMLElement;
+        const cellId = moreBtn.getAttribute('data-cellid');
         const objectid = moreBtn.getAttribute('data-objectid');
+        const dim = Number(moreBtn.getAttribute('data-dim') || '1');
 
-        if (objectid) {
-            console.log(`[PlutoRenderer] Found "show more" button with objectid: ${objectid}`);
+        if (objectid && cellId) {
+            console.log(`[PlutoRenderer] Found "show more" button with cellId=${cellId}, objectid=${objectid}, dim=${dim}`);
 
             moreBtn.style.cursor = 'pointer';
             moreBtn.addEventListener('click', (e) => {
                 e.stopPropagation();
-                console.log(`[PlutoRenderer] "show more" clicked, objectid: ${objectid}`);
+                console.log(`[PlutoRenderer] "show more" clicked, cellId=${cellId}, objectid=${objectid}, dim=${dim}`);
 
                 // Update button state
                 moreBtn.textContent = 'loading...';
@@ -951,7 +955,9 @@ function setupShowMoreButtons(container: HTMLElement, context: RendererContext<v
                 if (context.postMessage) {
                     context.postMessage({
                         type: 'showMore',
-                        objectid: objectid
+                        cellId,
+                        objectid,
+                        dim,
                     } as PlutoShowMoreMessage);
                 }
             });

@@ -326,7 +326,14 @@ function setupRendererMessaging(context: vscode.ExtensionContext) {
     const messaging = vscode.notebooks.createRendererMessaging('pluto-html-renderer');
 
     const disposable = messaging.onDidReceiveMessage(e => {
-        const message = e.message as { type: string; name?: string; value?: unknown; objectid?: string };
+        const message = e.message as {
+            type: string;
+            name?: string;
+            value?: unknown;
+            objectid?: string;
+            cellId?: string;
+            dim?: number;
+        };
         log(`Received renderer message: ${JSON.stringify(message)}`);
 
         if (message.type === 'setBond' && message.name !== undefined) {
@@ -337,14 +344,20 @@ function setupRendererMessaging(context: vscode.ExtensionContext) {
             } else {
                 log('No notebook or controller found');
             }
-        } else if (message.type === 'showMore' && message.objectid) {
+        } else if (message.type === 'showMore' && message.objectid && message.cellId) {
             // Handle "show more" request from tree view
             const notebook = e.editor.notebook;
             if (notebook && controller) {
-                controller.getPublishedObject(notebook, message.objectid);
+                controller
+                    .reshowCell(notebook, message.cellId, message.objectid, message.dim ?? 1)
+                    .catch((err) => {
+                        log(`showMore failed: ${String(err)}`);
+                    });
             } else {
                 log('No notebook or controller found for showMore');
             }
+        } else if (message.type === 'showMore') {
+            log('Ignoring showMore message without cellId/objectid');
         }
     });
 

@@ -128,8 +128,6 @@ export class PlutoServer extends EventEmitter {
     private cellOrder: string[] = [];
     private pendingCellIds = new Set<string>();
 
-    private pendingObjectRequests: Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }> = new Map();
-    private objectRequestTimeouts = new Map<string, NodeJS.Timeout>();
     private startupTimeout: NodeJS.Timeout | null = null;
     private connectDelayTimeout: NodeJS.Timeout | null = null;
     private resetSharedStateTimeout: NodeJS.Timeout | null = null;
@@ -367,8 +365,6 @@ export class PlutoServer extends EventEmitter {
                 for (const event of result.events) {
                     this.emit('cellState', event.cellId, event.state);
                 }
-            } else if (type === 'object_result') {
-                this.handleObjectResult(message);
             }
         } catch (err) {
             this.emit('error', err as Error);
@@ -397,64 +393,12 @@ export class PlutoServer extends EventEmitter {
         });
     }
 
-    async getPublishedObject(objectid: string): Promise<unknown> {
-        return new Promise((resolve, reject) => {
-            const requestId = this.idGenerator();
-            this.pendingObjectRequests.set(requestId, { resolve, reject });
-
-            if (!this.transport) {
-                this.pendingObjectRequests.delete(requestId);
-                reject(new Error('WebSocket not initialized'));
-                return;
-            }
-
-            if (this.transport.readyState() !== 1) {
-                this.pendingObjectRequests.delete(requestId);
-                reject(new Error('WebSocket not open'));
-                return;
-            }
-
-            const message = {
-                type: 'get_published_object',
-                client_id: this.clientId,
-                request_id: requestId,
-                body: { objectid },
-                notebook_id: this.notebookId,
-            };
-
-            const encoded = encode(message);
-            this.transport.send(Buffer.from(encoded));
-
-            const timeoutHandle = this.scheduler.setTimeout(() => {
-                this.objectRequestTimeouts.delete(requestId);
-                if (this.pendingObjectRequests.has(requestId)) {
-                    this.pendingObjectRequests.delete(requestId);
-                    reject(new Error('Timeout waiting for published object'));
-                }
-            }, 10000);
-            this.objectRequestTimeouts.set(requestId, timeoutHandle);
+    async reshowCell(cellId: string, objectid: string, dim: number): Promise<void> {
+        this.sendMessage('reshow_cell', {
+            cell_id: cellId,
+            objectid,
+            dim,
         });
-    }
-
-    private handleObjectResult(message: Record<string, unknown>): void {
-        const requestId = message.request_id as string;
-        const body = message.body as Record<string, unknown>;
-
-        const pending = this.pendingObjectRequests.get(requestId);
-        if (pending) {
-            this.pendingObjectRequests.delete(requestId);
-            const timeout = this.objectRequestTimeouts.get(requestId);
-            if (timeout) {
-                this.scheduler.clearTimeout(timeout);
-                this.objectRequestTimeouts.delete(requestId);
-            }
-
-            if (body?.success === false) {
-                pending.reject(new Error(body.message as string || 'Failed to get object'));
-            } else {
-                pending.resolve(body?.object);
-            }
-        }
     }
 
     async interruptAll(): Promise<void> {
@@ -625,14 +569,6 @@ export class PlutoServer extends EventEmitter {
             this.scheduler.clearTimeout(this.resetSharedStateTimeout);
             this.resetSharedStateTimeout = null;
         }
-        for (const timeout of this.objectRequestTimeouts.values()) {
-            this.scheduler.clearTimeout(timeout);
-        }
-        this.objectRequestTimeouts.clear();
-        for (const [, pending] of this.pendingObjectRequests) {
-            pending.reject(new Error('Pluto server stopped'));
-        }
-        this.pendingObjectRequests.clear();
         this.cellOutputs.clear();
         this.knownCellIds.clear();
         this.cellOrder = [];
