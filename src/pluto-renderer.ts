@@ -44,6 +44,16 @@ function setMathJaxConfig(config: any): void {
 let mathJaxInitialized = false;
 let mathJaxLoadPromise: Promise<void> | null = null;
 
+async function waitForMathJaxReady(timeoutMs: number = 5000): Promise<void> {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+        if (getMathJax()?.typeset) {
+            return;
+        }
+        await new Promise<void>(resolve => setTimeout(resolve, 50));
+    }
+}
+
 /**
  * Setup MathJax 3 configuration and load the script
  * Based on Pluto.jl's SetupMathJax.js
@@ -63,7 +73,7 @@ function setupMathJax(): Promise<void> {
             // Check if script already exists
             if (document.getElementById('MathJax-script')) {
                 console.log('[PlutoRenderer] MathJax script already exists');
-                resolve();
+                waitForMathJaxReady().then(() => resolve());
                 return;
             }
 
@@ -679,14 +689,14 @@ async function executeScripts(container: HTMLElement): Promise<void> {
         if (oldScript.src) {
             // External script - load it
             console.log(`[PlutoRenderer] Loading external script: ${oldScript.src}`);
-            await new Promise<void>((resolve, reject) => {
+            await new Promise<void>((resolve) => {
                 newScript.onload = () => {
                     console.log(`[PlutoRenderer] External script loaded: ${oldScript.src}`);
                     resolve();
                 };
                 newScript.onerror = (e) => {
                     console.error(`[PlutoRenderer] Failed to load script: ${oldScript.src}`, e);
-                    reject(e);
+                    resolve();
                 };
                 oldScript.parentNode?.replaceChild(newScript, oldScript);
             });

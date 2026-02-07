@@ -156,6 +156,15 @@ class PlutoKernel {
             clearTimeout(timeout);
         }
         this.pendingDirectUpdates.clear();
+        for (const timeout of this.pendingStateSync.values()) {
+            clearTimeout(timeout);
+        }
+        this.pendingStateSync.clear();
+        for (const timeout of this.foldChangingTimers.values()) {
+            clearTimeout(timeout);
+        }
+        this.foldChangingTimers.clear();
+        this.foldChangingCellIds.clear();
 
         // End all running executions
         for (const [cellId, execution] of this.cellExecutions) {
@@ -439,6 +448,7 @@ class PlutoKernel {
 
     // Track cells that are being folded/unfolded (changes should be ignored)
     private foldChangingCellIds = new Set<string>();
+    private foldChangingTimers = new Map<string, NodeJS.Timeout>();
 
     /**
      * Mark a cell as undergoing fold/unfold change.
@@ -446,10 +456,19 @@ class PlutoKernel {
      */
     markCellAsFoldChanging(cellId: string): void {
         this.foldChangingCellIds.add(cellId);
-        // Auto-clear after a short delay to handle any edge cases
-        setTimeout(() => {
+
+        const existingTimer = this.foldChangingTimers.get(cellId);
+        if (existingTimer) {
+            clearTimeout(existingTimer);
+        }
+
+        // Auto-clear after a short delay to handle any edge cases.
+        // 500ms was occasionally too short on slower environments.
+        const timeout = setTimeout(() => {
             this.foldChangingCellIds.delete(cellId);
-        }, 500);
+            this.foldChangingTimers.delete(cellId);
+        }, 2000);
+        this.foldChangingTimers.set(cellId, timeout);
     }
 
     /**
@@ -1615,14 +1634,18 @@ export class PlutoNotebookController implements vscode.Disposable {
         // Listen for notebook changes
         this.disposables.push(
             vscode.workspace.onDidChangeNotebookDocument(e => {
-                this.handleNotebookChange(e);
+                this.handleNotebookChange(e).catch((err) => {
+                    console.error('[BetterPlutoController] Failed to handle notebook change:', err);
+                });
             })
         );
 
         // Listen for notebook save - execute modified cells on Cmd+S
         this.disposables.push(
             vscode.workspace.onDidSaveNotebookDocument(notebook => {
-                this.handleNotebookSave(notebook);
+                this.handleNotebookSave(notebook).catch((err) => {
+                    console.error('[BetterPlutoController] Failed to handle notebook save:', err);
+                });
             })
         );
 

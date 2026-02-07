@@ -129,6 +129,10 @@ export class PlutoServer extends EventEmitter {
     private pendingCellIds = new Set<string>();
 
     private pendingObjectRequests: Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }> = new Map();
+    private objectRequestTimeouts = new Map<string, NodeJS.Timeout>();
+    private startupTimeout: NodeJS.Timeout | null = null;
+    private connectDelayTimeout: NodeJS.Timeout | null = null;
+    private resetSharedStateTimeout: NodeJS.Timeout | null = null;
 
     private vscodeToPlutoId = new Map<string, string>();
     private plutoToVscodeId = new Map<string, string>();
@@ -195,6 +199,31 @@ export class PlutoServer extends EventEmitter {
             let stderrBuffer = '';
             let resolved = false;
             let notebookIdFound = false;
+            let httpReady = false;
+
+            const tryConnect = (): void => {
+                if (resolved || !notebookIdFound || !httpReady) {
+                    return;
+                }
+                resolved = true;
+                this.logger('[BetterPlutoServer] HTTP server and notebook ID are ready, connecting WebSocket...');
+
+                this.connectDelayTimeout = this.scheduler.setTimeout(async () => {
+                    this.connectDelayTimeout = null;
+                    try {
+                        await this.connectWebSocket();
+                        if (this.startupTimeout) {
+                            this.scheduler.clearTimeout(this.startupTimeout);
+                            this.startupTimeout = null;
+                        }
+                        this.isReady = true;
+                        this.emit('ready');
+                        resolve();
+                    } catch (err) {
+                        reject(err);
+                    }
+                }, 1000);
+            };
 
             this.process.stdout?.on('data', (data) => {
                 const text = data.toString();
@@ -206,6 +235,7 @@ export class PlutoServer extends EventEmitter {
                         this.notebookId = match[1];
                         notebookIdFound = true;
                         this.logger(`[BetterPlutoServer] Notebook ID: ${this.notebookId}`);
+                        tryConnect();
                     }
                 }
             });
@@ -215,19 +245,8 @@ export class PlutoServer extends EventEmitter {
                 stderrBuffer += text;
 
                 if (!resolved && stderrBuffer.includes('Go to http://localhost')) {
-                    resolved = true;
-                    this.logger('[BetterPlutoServer] HTTP server is ready, connecting WebSocket...');
-
-                    this.scheduler.setTimeout(async () => {
-                        try {
-                            await this.connectWebSocket();
-                            this.isReady = true;
-                            this.emit('ready');
-                            resolve();
-                        } catch (err) {
-                            reject(err);
-                        }
-                    }, 1000);
+                    httpReady = true;
+                    tryConnect();
                 }
             });
 
@@ -244,7 +263,8 @@ export class PlutoServer extends EventEmitter {
                 this.emit('closed');
             });
 
-            this.scheduler.setTimeout(() => {
+            this.startupTimeout = this.scheduler.setTimeout(() => {
+                this.startupTimeout = null;
                 if (!resolved) {
                     reject(new Error('Pluto server startup timeout'));
                 }
@@ -271,7 +291,8 @@ export class PlutoServer extends EventEmitter {
                     notebook_id: this.notebookId,
                 });
 
-                this.scheduler.setTimeout(() => {
+                this.resetSharedStateTimeout = this.scheduler.setTimeout(() => {
+                    this.resetSharedStateTimeout = null;
                     this.sendMessage('reset_shared_state', {
                         notebook_id: this.notebookId,
                     });
@@ -382,11 +403,13 @@ export class PlutoServer extends EventEmitter {
             this.pendingObjectRequests.set(requestId, { resolve, reject });
 
             if (!this.transport) {
+                this.pendingObjectRequests.delete(requestId);
                 reject(new Error('WebSocket not initialized'));
                 return;
             }
 
             if (this.transport.readyState() !== 1) {
+                this.pendingObjectRequests.delete(requestId);
                 reject(new Error('WebSocket not open'));
                 return;
             }
@@ -402,12 +425,14 @@ export class PlutoServer extends EventEmitter {
             const encoded = encode(message);
             this.transport.send(Buffer.from(encoded));
 
-            this.scheduler.setTimeout(() => {
+            const timeoutHandle = this.scheduler.setTimeout(() => {
+                this.objectRequestTimeouts.delete(requestId);
                 if (this.pendingObjectRequests.has(requestId)) {
                     this.pendingObjectRequests.delete(requestId);
                     reject(new Error('Timeout waiting for published object'));
                 }
             }, 10000);
+            this.objectRequestTimeouts.set(requestId, timeoutHandle);
         });
     }
 
@@ -418,6 +443,11 @@ export class PlutoServer extends EventEmitter {
         const pending = this.pendingObjectRequests.get(requestId);
         if (pending) {
             this.pendingObjectRequests.delete(requestId);
+            const timeout = this.objectRequestTimeouts.get(requestId);
+            if (timeout) {
+                this.scheduler.clearTimeout(timeout);
+                this.objectRequestTimeouts.delete(requestId);
+            }
 
             if (body?.success === false) {
                 pending.reject(new Error(body.message as string || 'Failed to get object'));
@@ -583,6 +613,34 @@ export class PlutoServer extends EventEmitter {
     }
 
     stop(): void {
+        if (this.startupTimeout) {
+            this.scheduler.clearTimeout(this.startupTimeout);
+            this.startupTimeout = null;
+        }
+        if (this.connectDelayTimeout) {
+            this.scheduler.clearTimeout(this.connectDelayTimeout);
+            this.connectDelayTimeout = null;
+        }
+        if (this.resetSharedStateTimeout) {
+            this.scheduler.clearTimeout(this.resetSharedStateTimeout);
+            this.resetSharedStateTimeout = null;
+        }
+        for (const timeout of this.objectRequestTimeouts.values()) {
+            this.scheduler.clearTimeout(timeout);
+        }
+        this.objectRequestTimeouts.clear();
+        for (const [, pending] of this.pendingObjectRequests) {
+            pending.reject(new Error('Pluto server stopped'));
+        }
+        this.pendingObjectRequests.clear();
+        this.cellOutputs.clear();
+        this.knownCellIds.clear();
+        this.cellOrder = [];
+        this.pendingCellIds.clear();
+        this.vscodeToPlutoId.clear();
+        this.plutoToVscodeId.clear();
+        this.notebookId = '';
+
         if (this.transport) {
             this.transport.close();
             this.transport = null;
