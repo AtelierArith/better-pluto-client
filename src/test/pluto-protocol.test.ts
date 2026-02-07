@@ -159,4 +159,36 @@ suite('pluto-protocol', () => {
         assert.strictEqual(result.events.length, 1);
         assert.strictEqual(result.events[0].state.output?.body, '');
     });
+
+    test('processNotebookDiff applies nested body patch without dropping objectid', () => {
+        const state = createState();
+        state.cellOutputs.set('cell-1', {
+            mime: 'application/vnd.pluto.tree+object',
+            body: JSON.stringify({
+                objectid: 'abc123def456',
+                type: 'Array',
+                elements: [[1, ['0.1', 'text/plain']], 'more'],
+            }),
+        });
+
+        const result = processNotebookDiff({
+            type: 'notebook_diff',
+            message: {
+                patches: [
+                    {
+                        op: 'replace',
+                        path: ['cell_results', 'cell-1', 'output', 'body', 'elements'],
+                        value: [[1, ['0.1', 'text/plain']], [2, ['0.2', 'text/plain']], 'more'],
+                    },
+                ],
+            },
+        }, state);
+
+        const body = result.nextState.cellOutputs.get('cell-1')?.body || '';
+        const parsed = JSON.parse(body) as { objectid?: string; type?: string; elements?: unknown[] };
+        assert.strictEqual(parsed.objectid, 'abc123def456');
+        assert.strictEqual(parsed.type, 'Array');
+        assert.ok(Array.isArray(parsed.elements));
+        assert.strictEqual(parsed.elements?.length, 3);
+    });
 });
