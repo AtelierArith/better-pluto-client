@@ -96,17 +96,27 @@ class PlutoKernel {
                     try { existingExecution.end(false, Date.now()); } catch {}
                 }
 
-                // Create execution object so results are properly rendered
-                const execution = this.controller.createNotebookCellExecution(cell);
-                this.cellExecutions.set(cellId, execution);
-                this.cellExecStates.set(cellId, {});
-                // DON'T delete cellOutputs here - Pluto may have already sent initial state
-                // with output data that we want to preserve and display.
-                // The handleCellState will use this cached output when rendering.
+                try {
+                    // Create execution object so results are properly rendered.
+                    // May throw if controller is not associated with this notebook (e.g. in E2E before kernel selection).
+                    const execution = this.controller.createNotebookCellExecution(cell);
+                    this.cellExecutions.set(cellId, execution);
+                    this.cellExecStates.set(cellId, {});
+                    // DON'T delete cellOutputs here - Pluto may have already sent initial state
+                    // with output data that we want to preserve and display.
+                    // The handleCellState will use this cached output when rendering.
 
-                execution.start(Date.now());
-                // Don't clear output - if there's cached output from initial state, keep it
-                // execution.clearOutput();
+                    execution.start(Date.now());
+                    // Don't clear output - if there's cached output from initial state, keep it
+                    // execution.clearOutput();
+                } catch (err) {
+                    const msg = err instanceof Error ? err.message : String(err);
+                    if (msg.includes('not associated') || msg.includes('NOT associated')) {
+                        log(`[BetterPlutoKernel] Controller not associated with notebook, skipping execution objects for runAllCellsOnStart (outputs will use direct updates)`);
+                    } else {
+                        throw err;
+                    }
+                }
             }
         }
 
@@ -1676,6 +1686,9 @@ export class PlutoNotebookController implements vscode.Disposable {
      * Start kernel for a notebook
      */
     async startKernel(notebook: vscode.NotebookDocument): Promise<void> {
+        // Associate this controller with the notebook so createNotebookCellExecution succeeds
+        // (e.g. when startKernel is run from command palette or E2E tests without prior kernel selection)
+        this.controller.updateNotebookAffinity(notebook, vscode.NotebookControllerAffinity.Preferred);
         const kernel = await this.getOrCreateKernel(notebook);
         await kernel.start();
     }
