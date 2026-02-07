@@ -110,6 +110,26 @@ This extension reads and writes standard Pluto.jl notebook files (`.jl`), which 
 
 ## Development
 
+### Project Structure
+
+- `src/extension.ts`: extension activation, command registration, renderer messaging
+- `src/PlutoNotebookController.ts`: notebook execution orchestration
+- `src/PlutoServer.ts`: Pluto process / transport orchestration with DI-friendly interfaces
+- `src/pluto-protocol.ts`: protocol decoding and notebook diff processing (pure logic)
+- `src/cell-state-machine.ts`: execution state accumulation and completion rules (pure logic)
+- `src/PlutoNotebookParser.ts`: parse/serialize Pluto `.jl` notebook format
+- `src/PlutoNotebookSerializer.ts`: VS Code `NotebookData` <-> Pluto parser bridge
+- `src/output-utils.ts`: output classification and rendering helpers
+- `src/pluto-renderer.ts`: webview renderer for interactive HTML outputs
+
+### Examples
+
+Sample notebooks are under `samples/`:
+
+- `samples/Basic.jl`
+- `samples/PlotsImages.jl`
+- `samples/PlutoTeachingTools.jl`
+
 ### Testing
 
 Run the test suite:
@@ -118,7 +138,7 @@ Run the test suite:
 yarn test
 ```
 
-Unit tests live in `src/test/` and cover the notebook parser, serializer, Pluto server helpers, and renderer TOC utils (see `extension.test.ts`, `pluto-notebook-parser.test.ts`, `pluto-notebook-serializer.test.ts`, `pluto-server.test.ts`, `pluto-toc-utils.test.ts`).
+Unit tests live in `src/test/` and cover parser/serializer, protocol decoding, execution state machine, output utils, Pluto server public behavior, and renderer TOC utils.
 
 ## License
 

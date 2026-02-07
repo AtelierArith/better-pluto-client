@@ -3,38 +3,17 @@
  */
 
 import { spawn, ChildProcess } from 'child_process';
-import { createConnection, Socket } from 'net';
 import { encode, decode } from '@msgpack/msgpack';
 import { EventEmitter } from 'events';
 import { log } from './extension';
+import {
+    type ProtocolLogEntry,
+    type ProtocolCellState,
+    processNotebookDiff,
+} from './pluto-protocol';
 
-/**
- * Check if a string is a Pluto objectid (12-20 character hex string)
- */
-function isPlutoObjectId(str: string | undefined | null): boolean {
-    if (!str) {return false;}
-    const trimmed = str.trim();
-    return /^[0-9a-f]{12,20}$/i.test(trimmed);
-}
-
-export interface LogEntry {
-    level: string;
-    msg: string;
-    line?: number;
-}
-
-export interface CellState {
-    cellId: string;
-    running: boolean;
-    queued: boolean;
-    output?: {
-        body: string;
-        mime: string;
-    };
-    errored: boolean;
-    runtime?: number;
-    logs?: LogEntry[];
-}
+export type LogEntry = ProtocolLogEntry;
+export type CellState = ProtocolCellState;
 
 export interface PlutoServerEvents {
     ready: () => void;
@@ -44,62 +23,147 @@ export interface PlutoServerEvents {
     closed: () => void;
 }
 
+export interface Scheduler {
+    setTimeout(handler: () => void, ms: number): NodeJS.Timeout;
+    clearTimeout(handle: NodeJS.Timeout): void;
+    setInterval(handler: () => void, ms: number): NodeJS.Timeout;
+    clearInterval(handle: NodeJS.Timeout): void;
+}
+
+export interface ProcessRunner {
+    spawnJulia(juliaCode: string): ChildProcess;
+}
+
+export interface KernelTransport {
+    onOpen(handler: () => void): void;
+    onMessage(handler: (data: Buffer | ArrayBuffer) => void): void;
+    onError(handler: (error: Error) => void): void;
+    onClose(handler: () => void): void;
+    send(data: Buffer): void;
+    close(): void;
+    readyState(): number;
+}
+
+export interface KernelTransportFactory {
+    create(url: string): Promise<KernelTransport>;
+}
+
+export interface PlutoServerOptions {
+    scheduler?: Scheduler;
+    processRunner?: ProcessRunner;
+    transportFactory?: KernelTransportFactory;
+    logger?: (message: string) => void;
+    idGenerator?: () => string;
+    portFinder?: () => Promise<number>;
+}
+
+const defaultScheduler: Scheduler = {
+    setTimeout: (handler, ms) => setTimeout(handler, ms),
+    clearTimeout: (handle) => clearTimeout(handle),
+    setInterval: (handler, ms) => setInterval(handler, ms),
+    clearInterval: (handle) => clearInterval(handle),
+};
+
+const defaultProcessRunner: ProcessRunner = {
+    spawnJulia: (juliaCode: string) => spawn('julia', ['--project=@.', '-e', juliaCode]),
+};
+
+const defaultLogger = (message: string): void => {
+    log(message);
+};
+
+const defaultIdGenerator = (): string => {
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+        const r = Math.random() * 16 | 0;
+        const v = c === 'x' ? r : (r & 0x3 | 0x8);
+        return v.toString(16);
+    });
+};
+
+const defaultPortFinder = async (): Promise<number> => {
+    const net = await import('net');
+    return new Promise((resolve, reject) => {
+        const server = net.createServer();
+        server.listen(0, '127.0.0.1', () => {
+            const addr = server.address();
+            if (addr && typeof addr === 'object') {
+                const port = addr.port;
+                server.close(() => resolve(port));
+            } else {
+                reject(new Error('Could not get port'));
+            }
+        });
+        server.on('error', reject);
+    });
+};
+
+const defaultTransportFactory: KernelTransportFactory = {
+    async create(url: string): Promise<KernelTransport> {
+        const wsModule = await import('ws');
+        const WS = wsModule.default || wsModule.WebSocket || wsModule;
+        const socket = new WS(url);
+
+        return {
+            onOpen: (handler) => socket.on('open', handler),
+            onMessage: (handler) => socket.on('message', (data: Buffer) => handler(data)),
+            onError: (handler) => socket.on('error', handler),
+            onClose: (handler) => socket.on('close', handler),
+            send: (data: Buffer) => socket.send(data),
+            close: () => socket.close(),
+            readyState: () => socket.readyState,
+        };
+    },
+};
+
 export class PlutoServer extends EventEmitter {
     private process: ChildProcess | null = null;
-    private ws: WebSocket | null = null;
-    private port: number = 0;
-    private notebookId: string = '';
-    private clientId: string = '';
-    private isReady: boolean = false;
-    private messageQueue: Array<{ resolve: (v: unknown) => void; reject: (e: Error) => void }> = [];
+    private transport: KernelTransport | null = null;
+    private port = 0;
+    private notebookId = '';
+    private clientId = '';
+    private isReady = false;
 
-    // Track accumulated output state for each cell
     private cellOutputs: Map<string, { body?: string; mime?: string }> = new Map();
-
-    // Track known cell IDs and their order
     private knownCellIds = new Set<string>();
     private cellOrder: string[] = [];
-    
-    // Track cells that are being added but not yet confirmed by Pluto
-    // This prevents syncCellOrder from sending cell_order without these cells
     private pendingCellIds = new Set<string>();
 
-
-    // Track pending get_published_object requests
     private pendingObjectRequests: Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }> = new Map();
-    
-    // Map VS Code cell IDs to Pluto cell IDs (for future use if needed)
+
     private vscodeToPlutoId = new Map<string, string>();
     private plutoToVscodeId = new Map<string, string>();
 
-    constructor() {
+    private readonly scheduler: Scheduler;
+    private readonly processRunner: ProcessRunner;
+    private readonly transportFactory: KernelTransportFactory;
+    private readonly logger: (message: string) => void;
+    private readonly idGenerator: () => string;
+    private readonly portFinder: () => Promise<number>;
+
+    constructor(options: PlutoServerOptions = {}) {
         super();
-        this.clientId = this.generateId();
+        this.scheduler = options.scheduler || defaultScheduler;
+        this.processRunner = options.processRunner || defaultProcessRunner;
+        this.transportFactory = options.transportFactory || defaultTransportFactory;
+        this.logger = options.logger || defaultLogger;
+        this.idGenerator = options.idGenerator || defaultIdGenerator;
+        this.portFinder = options.portFinder || defaultPortFinder;
+
+        this.clientId = this.idGenerator();
     }
 
-    /**
-     * Get the current cell order tracked by the server
-     */
     getCellOrder(): string[] {
         return [...this.cellOrder];
     }
 
-    /**
-     * Check if a cell is known to Pluto (has cell_inputs registered) or is pending addition.
-     * Pending cells are included so that syncCellOrder doesn't accidentally exclude them
-     * while addCellOnly is waiting for Pluto's confirmation.
-     */
     isKnownCell(cellId: string): boolean {
         return this.knownCellIds.has(cellId) || this.pendingCellIds.has(cellId);
     }
 
-    /**
-     * Start Pluto server and open notebook
-     */
     async start(notebookPath: string): Promise<void> {
-        this.port = await this.findPort();
+        this.port = await this.portFinder();
 
-        log(`[BetterPlutoServer] Starting on port ${this.port}`);
+        this.logger(`[BetterPlutoServer] Starting on port ${this.port}`);
 
         const juliaCode = `
             import Pluto
@@ -125,7 +189,7 @@ export class PlutoServer extends EventEmitter {
         `;
 
         return new Promise((resolve, reject) => {
-            this.process = spawn('julia', ['--project=@.', '-e', juliaCode]);
+            this.process = this.processRunner.spawnJulia(juliaCode);
 
             let outputBuffer = '';
             let stderrBuffer = '';
@@ -135,15 +199,13 @@ export class PlutoServer extends EventEmitter {
             this.process.stdout?.on('data', (data) => {
                 const text = data.toString();
                 outputBuffer += text;
-                console.log('[PlutoServer stdout]', text.trim());
 
-                // Extract notebook ID when available
                 if (!notebookIdFound) {
                     const match = outputBuffer.match(/NOTEBOOK_ID=([a-f0-9-]+)/);
                     if (match) {
                         this.notebookId = match[1];
                         notebookIdFound = true;
-                        log(`[BetterPlutoServer] Notebook ID: ${this.notebookId}`);
+                        this.logger(`[BetterPlutoServer] Notebook ID: ${this.notebookId}`);
                     }
                 }
             });
@@ -151,15 +213,12 @@ export class PlutoServer extends EventEmitter {
             this.process.stderr?.on('data', (data) => {
                 const text = data.toString();
                 stderrBuffer += text;
-                console.log('[PlutoServer stderr]', text.trim());
 
-                // Pluto prints "Go to http://localhost:PORT/" when HTTP server is ready
                 if (!resolved && stderrBuffer.includes('Go to http://localhost')) {
                     resolved = true;
-                    log('[BetterPlutoServer] HTTP server is ready, connecting WebSocket...');
+                    this.logger('[BetterPlutoServer] HTTP server is ready, connecting WebSocket...');
 
-                    // Give the server a moment to fully initialize
-                    setTimeout(async () => {
+                    this.scheduler.setTimeout(async () => {
                         try {
                             await this.connectWebSocket();
                             this.isReady = true;
@@ -176,121 +235,94 @@ export class PlutoServer extends EventEmitter {
                 if (!resolved) {
                     reject(err);
                 }
-                this.emit('error', err);
+                this.emit('error', err as Error);
             });
 
             this.process.on('exit', (code) => {
-                log(`[BetterPlutoServer] Process exited with code ${code}`);
+                this.logger(`[BetterPlutoServer] Process exited with code ${code}`);
                 this.isReady = false;
                 this.emit('closed');
             });
 
-            // Timeout
-            setTimeout(() => {
+            this.scheduler.setTimeout(() => {
                 if (!resolved) {
                     reject(new Error('Pluto server startup timeout'));
                 }
-            }, 120000); // 2 minute timeout for Pluto startup
+            }, 120000);
         });
     }
 
-    /**
-     * Connect to Pluto WebSocket
-     */
     private async connectWebSocket(): Promise<void> {
-        // Import ws module
-        const wsModule = await import('ws');
-        const WS = wsModule.default || wsModule.WebSocket || wsModule;
+        const url = `ws://127.0.0.1:${this.port}/`;
+        this.logger(`[BetterPlutoServer] Connecting to ${url}`);
+
+        this.transport = await this.transportFactory.create(url);
 
         return new Promise((resolve, reject) => {
-            const url = `ws://127.0.0.1:${this.port}/`;
-            log(`[BetterPlutoServer] Connecting to ${url}`);
+            if (!this.transport) {
+                reject(new Error('WebSocket transport not initialized'));
+                return;
+            }
 
-            try {
-                const socket = new WS(url);
-                this.ws = socket as unknown as WebSocket;
+            this.transport.onOpen(() => {
+                this.logger('[BetterPlutoServer] WebSocket connected');
 
-                socket.on('open', () => {
-                    log('[BetterPlutoServer] WebSocket connected');
+                this.sendMessage('connect', {
+                    notebook_id: this.notebookId,
+                });
 
-                    // Send connect message
-                    this.sendMessage('connect', {
+                this.scheduler.setTimeout(() => {
+                    this.sendMessage('reset_shared_state', {
                         notebook_id: this.notebookId,
                     });
+                    resolve();
+                }, 500);
+            });
 
-                    // Request full state
-                    setTimeout(() => {
-                        this.sendMessage('reset_shared_state', {
-                            notebook_id: this.notebookId,
-                        });
-                        resolve();
-                    }, 500);
-                });
+            this.transport.onMessage((data) => {
+                this.handleMessage(data);
+            });
 
-                socket.on('message', (data: Buffer) => {
-                    this.handleMessage(data);
-                });
+            this.transport.onError((err) => {
+                reject(new Error(`WebSocket connection failed: ${err.message}`));
+            });
 
-                socket.on('error', (err: Error) => {
-                    console.error('[BetterPlutoServer] WebSocket error:', err.message);
-                    reject(new Error(`WebSocket connection failed: ${err.message}`));
-                });
-
-                socket.on('close', () => {
-                    log('[BetterPlutoServer] WebSocket closed');
-                    this.emit('closed');
-                });
-            } catch (err) {
-                console.error('[BetterPlutoServer] Failed to create WebSocket:', err);
-                reject(err);
-            }
+            this.transport.onClose(() => {
+                this.logger('[BetterPlutoServer] WebSocket closed');
+                this.emit('closed');
+            });
         });
     }
 
-    /**
-     * Request full notebook state from Pluto
-     */
     requestFullState(): void {
         this.sendMessage('reset_shared_state', {
             notebook_id: this.notebookId,
         });
     }
 
-    /**
-     * Send message to Pluto server
-     */
     private sendMessage(type: string, body: Record<string, unknown> = {}): void {
-        if (!this.ws) {
-            console.error('[BetterPlutoServer] Cannot send message, WebSocket not initialized');
+        if (!this.transport) {
             return;
         }
 
-        // Check if socket is open (readyState 1 = OPEN)
-        const socket = this.ws as any;
-        if (socket.readyState !== 1) {
-            console.error('[BetterPlutoServer] Cannot send message, WebSocket not open (state:', socket.readyState, ')');
+        if (this.transport.readyState() !== 1) {
             return;
         }
 
         const message = {
             type,
             client_id: this.clientId,
-            request_id: this.generateId(),
+            request_id: this.idGenerator(),
             body,
             notebook_id: this.notebookId,
         };
 
-        log(`[BetterPlutoServer] Sending: ${type}`);
         const encoded = encode(message);
-        socket.send(Buffer.from(encoded));
+        this.transport.send(Buffer.from(encoded));
     }
 
-    /**
-     * Handle incoming message
-     */
     private handleMessage(data: Buffer | ArrayBuffer): void {
         try {
-            // Convert to Uint8Array for msgpack
             const uint8 = data instanceof Buffer
                 ? new Uint8Array(data)
                 : new Uint8Array(data);
@@ -298,593 +330,43 @@ export class PlutoServer extends EventEmitter {
             const message = decode(uint8) as Record<string, unknown>;
             const type = message.type as string;
 
-            log(`[BetterPlutoServer] Received: ${type}`);
+            if (type === 'notebook_diff') {
+                const result = processNotebookDiff(message, {
+                    cellOutputs: this.cellOutputs,
+                    knownCellIds: this.knownCellIds,
+                    cellOrder: this.cellOrder,
+                    pendingCellIds: this.pendingCellIds,
+                });
 
-            // Log ALL message types to debug add_cell response
-            log(`[BetterPlutoServer] Received message type: ${type}`);
-            
-            if (type === '👋') {
-                log('[BetterPlutoServer] Got welcome message from Pluto');
-            } else if (type === 'notebook_diff') {
-                const content = message.message as Record<string, unknown>;
-                const patches = content?.patches as Array<{
-                    path: (string | number)[];
-                    op: string;
-                    value?: unknown;
-                }>;
-                log(`[BetterPlutoServer] notebook_diff patches=${patches?.length ?? 0}`);
-                this.handleNotebookDiff(message);
-            } else if (type === 'run_feedback') {
-                log(`[BetterPlutoServer] run_feedback: ${JSON.stringify(message).slice(0, 300)}`);
+                this.cellOutputs = result.nextState.cellOutputs;
+                this.knownCellIds = result.nextState.knownCellIds;
+                this.cellOrder = result.nextState.cellOrder;
+                this.pendingCellIds = result.nextState.pendingCellIds;
+
+                for (const event of result.events) {
+                    this.emit('cellState', event.cellId, event.state);
+                }
             } else if (type === 'object_result') {
                 this.handleObjectResult(message);
-            } else {
-                // Log unknown message types with full content for debugging
-                log(`[BetterPlutoServer] Unknown message: ${JSON.stringify(message).slice(0, 500)}`);
             }
         } catch (err) {
-            console.error('[BetterPlutoServer] Error handling message:', err);
+            this.emit('error', err as Error);
         }
     }
 
-    /**
-     * Handle notebook state diff
-     */
-    private handleNotebookDiff(message: Record<string, unknown>): void {
-        const content = message.message as Record<string, unknown>;
-        const patches = content?.patches as Array<{
-            path: (string | number)[];
-            op: string;
-            value?: unknown;
-        }>;
-
-        if (!patches) {return;}
-
-        // Debug: log patch paths (trim to avoid huge output)
-        const patchPreview = patches.slice(0, 8).map((patch) => {
-            return `${patch.op} ${JSON.stringify(patch.path)}`;
-        });
-        log(`[BetterPlutoServer] notebook_diff patch paths: ${patchPreview.join(' | ')}`);
-
-        // Process in two passes so output (body/mime) is applied before running/last_run_timestamp.
-        // Otherwise the controller may end the execution with 0 outputs and the cell stays empty
-        // (e.g. TableOfContents when Pluto sends replace running before add output.body).
-        const isOutputSubField = (p: typeof patches[0]) => {
-            const path = p.path;
-            return path[0] === 'cell_results' && path.length >= 4 && path[2] === 'output';
-        };
-        const outputPatches = patches.filter(isOutputSubField);
-        const otherPatches = patches.filter((p) => !isOutputSubField(p));
-
-        for (const patch of [...outputPatches, ...otherPatches]) {
-            const path = patch.path;
-
-            // Handle full state replacement (initial state)
-            if (path.length === 0 && patch.op === 'replace') {
-                const fullState = patch.value as Record<string, unknown>;
-                if (fullState?.cell_results) {
-                    this.handleFullCellResults(fullState.cell_results as Record<string, unknown>);
-                }
-                // Track cell order from initial state
-                if (fullState?.cell_order && Array.isArray(fullState.cell_order)) {
-                    this.cellOrder = fullState.cell_order as string[];
-                    if (fullState?.cell_inputs && typeof fullState.cell_inputs === 'object') {
-                        this.knownCellIds = new Set(Object.keys(fullState.cell_inputs as Record<string, unknown>));
-                    } else {
-                        this.knownCellIds = new Set(this.cellOrder);
-                    }
-                    log(`[BetterPlutoServer] Initial cell order: ${this.cellOrder.length} cells: [${this.cellOrder.join(', ')}]`);
-                    log(`[BetterPlutoServer] Known cell IDs: [${Array.from(this.knownCellIds).join(', ')}]`);
-                }
-                continue;
-            }
-
-            // Track cell_inputs add/remove to keep knownCellIds in sync
-            if (path[0] === 'cell_inputs') {
-                const cellId = path[1] as string;
-                if (cellId) {
-                    if (patch.op === 'remove') {
-                        this.knownCellIds.delete(cellId);
-                        // Also remove from pending if Pluto explicitly removed it
-                        if (this.pendingCellIds.has(cellId)) {
-                            this.pendingCellIds.delete(cellId);
-                            log(`[BetterPlutoServer] Cell ${cellId} removed by Pluto, cleared from pendingCellIds`);
-                        }
-                    } else if (patch.op === 'add' || patch.op === 'replace') {
-                        this.knownCellIds.add(cellId);
-                        // Remove from pending since it's now confirmed
-                        if (this.pendingCellIds.has(cellId)) {
-                            this.pendingCellIds.delete(cellId);
-                            log(`[BetterPlutoServer] Cell ${cellId} confirmed via ${patch.op}, removed from pendingCellIds`);
-                        }
-                    }
-                }
-                continue;
-            }
-
-            // Track cell order changes (no-op for execution, but keep local order in sync)
-            if (path[0] === 'cell_order' && patch.op === 'replace' && Array.isArray(patch.value)) {
-                const newOrder = patch.value as string[];
-                log(`[BetterPlutoServer] cell_order updated: [${newOrder.join(', ')}]`);
-                this.cellOrder = newOrder;
-                continue;
-            }
-
-            // Only handle cell_results patches
-            if (path[0] !== 'cell_results') {continue;}
-
-            const cellId = path[1] as string;
-            if (!cellId) {continue;}
-
-            // Handle full cell result replacement
-            if (path.length === 2 && patch.op === 'replace') {
-                const cellResult = patch.value as Record<string, unknown>;
-                this.handleCellResult(cellId, cellResult);
-                continue;
-            }
-
-            const field = path[2] as string;
-
-            // Handle nested output fields (path length >= 4)
-            // e.g., ["cell_results", cellId, "output", "body"]
-            if (field === 'output' && path.length >= 4) {
-                const subField = path[3] as string;
-                this.handleOutputSubField(cellId, subField, patch.value);
-                continue;
-            }
-
-            this.handleCellField(cellId, field, patch.value);
-        }
-    }
-
-    /**
-     * Handle full cell results from initial state
-     */
-    private handleFullCellResults(cellResults: Record<string, unknown>): void {
-        log('[BetterPlutoServer] Processing full cell results');
-        for (const [cellId, result] of Object.entries(cellResults)) {
-            this.handleCellResult(cellId, result as Record<string, unknown>);
-        }
-    }
-
-    /**
-     * Handle a single cell's full result
-     */
-    private handleCellResult(cellId: string, result: Record<string, unknown>): void {
-        if (!result) {return;}
-
-        const state: Partial<CellState> = { cellId };
-
-        if (result.running !== undefined) {
-            state.running = result.running as boolean;
-        }
-        if (result.errored !== undefined) {
-            state.errored = result.errored as boolean;
-        }
-        if (result.runtime !== undefined) {
-            state.runtime = result.runtime as number;
-        }
-        if (result.output) {
-            const output = result.output as Record<string, unknown>;
-            state.output = this.extractOutput(output);
-        }
-        if (result.logs) {
-            state.logs = this.extractLogs(result.logs as unknown[]);
-            console.log(`[BetterPlutoServer] Cell ${cellId} has ${state.logs?.length || 0} logs`);
-        }
-
-        log(`[BetterPlutoServer] cellResult ${cellId}: running=${state.running}, errored=${state.errored}, runtime=${state.runtime}, hasOutput=${!!state.output}`);
-        console.log(`[BetterPlutoServer] Cell ${cellId} full result:`, JSON.stringify(state).slice(0, 200));
-        this.emit('cellState', cellId, state);
-    }
-
-    /**
-     * Handle a single field update for a cell
-     */
-    private handleCellField(cellId: string, field: string, value: unknown): void {
-        const state: Partial<CellState> = { cellId };
-
-        if (field === 'running') {
-            state.running = value as boolean;
-            log(`[BetterPlutoServer] cellField ${cellId} running=${state.running}`);
-        } else if (field === 'queued') {
-            state.queued = value as boolean;
-            log(`[BetterPlutoServer] cellField ${cellId} queued=${state.queued}`);
-        } else if (field === 'errored') {
-            state.errored = value as boolean;
-            log(`[BetterPlutoServer] cellField ${cellId} errored=${state.errored}`);
-        } else if (field === 'runtime') {
-            state.runtime = value as number;
-            log(`[BetterPlutoServer] cellField ${cellId} runtime=${state.runtime}`);
-        } else if (field === 'output') {
-            // Full output object replacement
-            state.output = this.extractOutput(value as Record<string, unknown>);
-            // Also update tracked state
-            this.cellOutputs.set(cellId, state.output);
-            log(`[BetterPlutoServer] cellField ${cellId} output mime=${state.output?.mime}`);
-        } else if (field === 'logs') {
-            // Handle logs - can be array or single log object (when pushed via JSONPatch)
-            if (Array.isArray(value)) {
-                state.logs = this.extractLogs(value);
-            } else if (value && typeof value === 'object') {
-                // Single log entry being pushed
-                const logEntry = this.extractSingleLog(value as Record<string, unknown>);
-                if (logEntry) {
-                    state.logs = [logEntry];
-                }
-            }
-        } else {
-            // Skip other fields
-            return;
-        }
-
-        console.log(`[BetterPlutoServer] Cell ${cellId} field ${field}:`, JSON.stringify(value)?.slice(0, 100));
-        this.emit('cellState', cellId, state);
-    }
-
-    /**
-     * Extract a single log entry from Pluto format
-     */
-    private extractSingleLog(logObj: Record<string, unknown>): LogEntry | null {
-        const level = String(logObj.level || 'LogLevel(-555)'); // Default to stdout level
-
-        log(`[BetterPlutoServer] Single log entry: ${JSON.stringify(logObj).slice(0, 300)}`);
-
-        // Extract message - msg is an array with [content, mime] format
-        let msg = '';
-        if (Array.isArray(logObj.msg) && logObj.msg.length > 0) {
-            // msg format: ["Hi\n", "text/plain"]
-            msg = String(logObj.msg[0] || '');
-        }
-
-        if (!msg) {return null;}
-
-        const entry = {
-            level,
-            msg,
-            line: logObj.line as number | undefined,
-        };
-
-        log(`[BetterPlutoServer] Extracted single log: ${JSON.stringify(entry)}`);
-        return entry;
-    }
-
-    /**
-     * Extract logs from Pluto format (array of logs)
-     */
-    private extractLogs(logsArray: unknown[]): LogEntry[] {
-        if (!Array.isArray(logsArray)) {
-            if (logsArray && typeof logsArray === 'object') {
-                const values = Object.values(logsArray as Record<string, unknown>);
-                console.log(`[BetterPlutoServer] Extracting ${values.length} logs from object`);
-                const result = values.map(log => {
-                    return this.extractSingleLog(log as Record<string, unknown>);
-                }).filter((log): log is LogEntry => log !== null);
-                console.log(`[BetterPlutoServer] Extracted logs:`, result);
-                return result;
-            }
-            log(`[BetterPlutoServer] logs is not an array: ${typeof logsArray}`);
-            return [];
-        }
-
-        console.log(`[BetterPlutoServer] Extracting ${logsArray.length} logs`);
-
-        const result = logsArray.map(log => {
-            return this.extractSingleLog(log as Record<string, unknown>);
-        }).filter((log): log is LogEntry => log !== null);
-
-        console.log(`[BetterPlutoServer] Extracted logs:`, result);
-        return result;
-    }
-
-    /**
-     * Handle nested output field update (e.g., output.body, output.mime)
-     */
-    private handleOutputSubField(cellId: string, subField: string, value: unknown): void {
-        // Get or create tracked output for this cell
-        let output = this.cellOutputs.get(cellId) || { body: '', mime: 'text/plain' };
-
-        if (subField === 'body') {
-            // Body can be string or object (for complex types like msgpack binary)
-            // First try to decode msgpack binary format
-            const decodedBody = this.tryDecodeMsgpackBinary(value, output.mime || 'text/plain');
-            let newBody: string | undefined;
-
-            if (decodedBody !== null) {
-                newBody = decodedBody;
-            } else if (typeof value === 'string') {
-                newBody = value;
-            } else if (value && typeof value === 'object') {
-                // For complex output like errors, try to extract msg or stringify
-                const obj = value as Record<string, unknown>;
-                if (obj.msg) {
-                    newBody = obj.msg as string;
-                } else {
-                    newBody = JSON.stringify(value);
-                }
-            }
-
-            // For tree+object, don't overwrite existing data with just an objectid
-            const isObjectIdOnly = output.mime === 'application/vnd.pluto.tree+object' &&
-                                   isPlutoObjectId(newBody);
-            if (isObjectIdOnly && output.body && output.body.length > 20) {
-                console.log(`[BetterPlutoServer] Cell ${cellId} skipping objectid-only update, keeping existing tree data`);
-                return; // Don't emit update
-            }
-
-            if (newBody !== undefined) {
-                output.body = newBody;
-            }
-            console.log(`[BetterPlutoServer] Cell ${cellId} output.body: ${output.body?.slice(0, 100)}`);
-        } else if (subField === 'mime') {
-            output.mime = value as string;
-            console.log(`[BetterPlutoServer] Cell ${cellId} output.mime: ${output.mime}`);
-        } else if (subField === 'last_run_timestamp') {
-            // last_run_timestamp update indicates cell evaluation is complete.
-            // Critical for unchanged cells where Pluto skips running/runtime diffs
-            // because those fields haven't changed from the previous execution.
-            const state: Partial<CellState> = {
-                cellId,
-                running: false,
-            };
-            this.emit('cellState', cellId, state);
-            return;
-        } else if (subField.includes('/')) {
-            // Rich output: patch path like ["cell_results", id, "output", "text/html"]
-            const decodedBody = this.tryDecodeMsgpackBinary(value, subField);
-            let newBody: string | undefined;
-            if (decodedBody !== null) {
-                newBody = decodedBody;
-            } else if (typeof value === 'string') {
-                newBody = value;
-            } else if (value instanceof Uint8Array || ArrayBuffer.isView(value)) {
-                const bytes = value instanceof Uint8Array ? value : new Uint8Array((value as ArrayBufferView).buffer);
-                newBody = subField.startsWith('image/') && subField !== 'image/svg+xml'
-                    ? Buffer.from(bytes).toString('base64')
-                    : Buffer.from(bytes).toString('utf-8');
-            } else if (value != null && typeof value === 'object') {
-                newBody = JSON.stringify(value);
-            }
-            if (newBody !== undefined) {
-                output.mime = subField;
-                output.body = newBody;
-                console.log(`[BetterPlutoServer] Cell ${cellId} output (rich) mime: ${subField}, body length: ${newBody.length}`);
-            }
-        } else {
-            // Skip other subfields like rootassignee, etc.
-            return;
-        }
-
-        this.cellOutputs.set(cellId, output);
-
-        // Emit updated state
-        const state: Partial<CellState> = {
-            cellId,
-            output: { body: output.body || '', mime: output.mime || 'text/plain' },
-        };
-        this.emit('cellState', cellId, state);
-    }
-
-    /** MIME types we can display, in display preference order (e.g. prefer HTML for TableOfContents) */
-    private static readonly RICH_OUTPUT_MIME_ORDER = [
-        'text/html',
-        'application/vnd.pluto.tree+object',
-        'image/svg+xml',
-        'image/png',
-        'image/jpeg',
-        'application/vnd.vega.v5+json',
-        'application/vnd.plotly.v1+json',
-        'text/plain',
-    ];
-
-    /**
-     * Extract output body from Pluto output format.
-     * Supports (1) body+mime shape and (2) rich output with MIME keys (e.g. {"text/html": "<div>..."}).
-     */
-    private extractOutput(output: Record<string, unknown>): { body: string; mime: string } {
-        if (!output || typeof output !== 'object') {
-            return { body: '', mime: 'text/plain' };
-        }
-
-        // 1) Standard shape: { body, mime }
-        const hasBody = output.body !== undefined;
-        const mimeFromShape = (output.mime as string) || 'text/plain';
-        if (hasBody) {
-            let body = '';
-            const mime = mimeFromShape;
-            const rawBody = output.body;
-            const decodedBody = this.tryDecodeMsgpackBinary(rawBody, mime);
-            if (decodedBody !== null) {
-                body = decodedBody;
-            } else if (typeof rawBody === 'string') {
-                body = rawBody;
-            } else if (rawBody instanceof Uint8Array || ArrayBuffer.isView(rawBody)) {
-                const bytes = rawBody instanceof Uint8Array
-                    ? rawBody
-                    : new Uint8Array((rawBody as ArrayBufferView).buffer);
-                if (mime.startsWith('image/') && mime !== 'image/svg+xml') {
-                    body = Buffer.from(bytes).toString('base64');
-                } else {
-                    body = Buffer.from(bytes).toString('utf-8');
-                }
-            } else if (Array.isArray(rawBody)) {
-                if (rawBody.every((v: unknown) => typeof v === 'number')) {
-                    const bytes = new Uint8Array(rawBody as number[]);
-                    if (mime.startsWith('image/') && mime !== 'image/svg+xml') {
-                        body = Buffer.from(bytes).toString('base64');
-                    } else {
-                        body = Buffer.from(bytes).toString('utf-8');
-                    }
-                } else {
-                    body = JSON.stringify(rawBody);
-                }
-            } else if (rawBody && typeof rawBody === 'object') {
-                body = JSON.stringify(rawBody);
-            }
-            if (body) {
-                console.log(`[BetterPlutoServer] Extracted output mime: ${mime}, body length: ${body.length}, preview: ${body.slice(0, 50)}`);
-                return { body, mime };
-            }
-        }
-
-        // 2) Rich output: object keys are MIME types (e.g. TableOfContents sends {"text/html": "..."})
-        for (const mime of PlutoServer.RICH_OUTPUT_MIME_ORDER) {
-            const value = output[mime];
-            if (value === undefined) { continue; }
-            let body = '';
-            const decoded = this.tryDecodeMsgpackBinary(value, mime);
-            if (decoded !== null) {
-                body = decoded;
-            } else if (typeof value === 'string') {
-                body = value;
-            } else if (value instanceof Uint8Array || ArrayBuffer.isView(value)) {
-                const bytes = value instanceof Uint8Array ? value : new Uint8Array((value as ArrayBufferView).buffer);
-                if (mime.startsWith('image/') && mime !== 'image/svg+xml') {
-                    body = Buffer.from(bytes).toString('base64');
-                } else {
-                    body = Buffer.from(bytes).toString('utf-8');
-                }
-            } else if (Array.isArray(value) && value.every((v: unknown) => typeof v === 'number')) {
-                const bytes = new Uint8Array(value as number[]);
-                body = mime.startsWith('image/') && mime !== 'image/svg+xml'
-                    ? Buffer.from(bytes).toString('base64')
-                    : Buffer.from(bytes).toString('utf-8');
-            } else if (value != null && typeof value === 'object') {
-                body = JSON.stringify(value);
-            }
-            if (body) {
-                console.log(`[BetterPlutoServer] Extracted rich output mime: ${mime}, body length: ${body.length}, preview: ${body.slice(0, 50)}`);
-                return { body, mime };
-            }
-        }
-
-        // Fallback: any other MIME-like key (contains '/')
-        for (const [key, value] of Object.entries(output)) {
-            if (key === 'body' || key === 'mime') { continue; }
-            if (!key.includes('/')) { continue; }
-            if (typeof value !== 'string') { continue; }
-            if (value.length > 0) {
-                console.log(`[BetterPlutoServer] Extracted output (fallback) mime: ${key}, body length: ${value.length}`);
-                return { body: value, mime: key };
-            }
-        }
-
-        console.log(`[BetterPlutoServer] Extracted output mime: ${mimeFromShape}, body length: 0`);
-        return { body: '', mime: mimeFromShape };
-    }
-
-    /**
-     * Try to decode msgpack binary format: {type: 18, data: {0: byte0, 1: byte1, ...}}
-     * Returns { bytes, isBase64 } or null if not in this format
-     * For binary data, always returns base64 to preserve bytes
-     */
-    private tryDecodeMsgpackBinary(body: unknown, mime: string): string | null {
-        console.log(`[BetterPlutoServer] tryDecodeMsgpackBinary: type=${typeof body}, isArray=${Array.isArray(body)}, isUint8Array=${body instanceof Uint8Array}`);
-
-        // Handle Uint8Array or Buffer directly (from msgpack decoder)
-        if (body instanceof Uint8Array || Buffer.isBuffer(body)) {
-            const bytes = body instanceof Uint8Array ? body : new Uint8Array(body);
-            console.log(`[BetterPlutoServer] Direct binary data: ${bytes.length} bytes, first 10: [${Array.from(bytes.slice(0, 10)).join(', ')}]`);
-
-            const isPNG = bytes[0] === 137 && bytes[1] === 80 && bytes[2] === 78 && bytes[3] === 71;
-            const isJPEG = bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255;
-            const isBinaryImage = isPNG || isJPEG || (mime.startsWith('image/') && mime !== 'image/svg+xml');
-
-            if (isBinaryImage) {
-                const result = Buffer.from(bytes).toString('base64');
-                console.log(`[BetterPlutoServer] Direct binary -> base64: ${result.length} chars`);
-                return result;
-            } else {
-                return Buffer.from(bytes).toString('utf-8');
-            }
-        }
-
-        let dataObj: Record<string, number> | null = null;
-
-        // First, try to parse if it's a JSON string
-        let bodyToCheck = body;
-        if (typeof body === 'string') {
-            try {
-                bodyToCheck = JSON.parse(body);
-            } catch {
-                // Not JSON, keep as string
-                return null;
-            }
-        }
-
-        // Check if it's an object with type: 18 and data
-        if (bodyToCheck && typeof bodyToCheck === 'object' && !Array.isArray(bodyToCheck)) {
-            const bodyObj = bodyToCheck as Record<string, unknown>;
-            if (bodyObj.type === 18 && bodyObj.data && typeof bodyObj.data === 'object') {
-                dataObj = bodyObj.data as Record<string, number>;
-            }
-        }
-
-        if (!dataObj) {return null;}
-
-        // Extract bytes from the data object
-        const allKeys = Object.keys(dataObj);
-        const keys = allKeys.map(k => parseInt(k)).filter(k => !isNaN(k)).sort((a, b) => a - b);
-
-        console.log(`[BetterPlutoServer] Msgpack binary: ${allKeys.length} total keys, ${keys.length} numeric keys`);
-
-        if (keys.length === 0) {return null;}
-
-        // Check if keys are contiguous
-        const maxKey = keys[keys.length - 1];
-        const minKey = keys[0];
-        console.log(`[BetterPlutoServer] Key range: ${minKey} to ${maxKey}, expected length: ${maxKey - minKey + 1}`);
-
-        const bytes = new Uint8Array(maxKey + 1);
-        for (const key of keys) {
-            bytes[key] = dataObj[String(key)];
-        }
-
-        console.log(`[BetterPlutoServer] Decoded msgpack binary for ${mime}: ${bytes.length} bytes, first 10: [${Array.from(bytes.slice(0, 10)).join(', ')}]`);
-
-        // Check if this looks like binary data (PNG, JPEG, etc.) by checking magic bytes
-        const isPNG = bytes[0] === 137 && bytes[1] === 80 && bytes[2] === 78 && bytes[3] === 71;
-        const isJPEG = bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255;
-        const isBinaryImage = isPNG || isJPEG || (mime.startsWith('image/') && mime !== 'image/svg+xml');
-
-        // Decode as base64 for binary images, UTF-8 for text (SVG, HTML, etc.)
-        let result: string;
-        if (isBinaryImage) {
-            result = Buffer.from(bytes).toString('base64');
-            console.log(`[BetterPlutoServer] Base64 encoded (binary image detected): ${result.length} chars`);
-        } else {
-            result = Buffer.from(bytes).toString('utf-8');
-        }
-
-        console.log(`[BetterPlutoServer] Decoded msgpack binary: ${bytes.length} bytes -> ${result.length} chars`);
-        return result;
-    }
-
-    /**
-     * Run a cell
-     */
     async runCell(cellId: string): Promise<void> {
-        console.log(`[BetterPlutoServer] runCell request: ${cellId}`);
         this.sendMessage('run_multiple_cells', {
             cells: [cellId],
         });
     }
 
-    /**
-     * Run multiple cells at once (more efficient for Run All)
-     */
     async runMultipleCells(cellIds: string[]): Promise<void> {
         this.sendMessage('run_multiple_cells', {
             cells: cellIds,
         });
     }
 
-    /**
-     * Set a bond value (for interactive widgets like Slider)
-     * This triggers reactive execution of dependent cells
-     */
     async setBond(name: string, value: unknown): Promise<void> {
-        console.log(`[BetterPlutoServer] Setting bond ${name} to`, value);
         this.sendMessage('update_notebook', {
             updates: [{
                 path: ['bonds', name],
@@ -894,25 +376,17 @@ export class PlutoServer extends EventEmitter {
         });
     }
 
-    /**
-     * Get a published object by its objectid
-     * Used to expand "show more" in tree views
-     */
     async getPublishedObject(objectid: string): Promise<unknown> {
-        console.log(`[BetterPlutoServer] Getting published object: ${objectid}`);
-
         return new Promise((resolve, reject) => {
-            const requestId = this.generateId();
+            const requestId = this.idGenerator();
             this.pendingObjectRequests.set(requestId, { resolve, reject });
 
-            // Send the request
-            if (!this.ws) {
+            if (!this.transport) {
                 reject(new Error('WebSocket not initialized'));
                 return;
             }
 
-            const socket = this.ws as any;
-            if (socket.readyState !== 1) {
+            if (this.transport.readyState() !== 1) {
                 reject(new Error('WebSocket not open'));
                 return;
             }
@@ -925,12 +399,10 @@ export class PlutoServer extends EventEmitter {
                 notebook_id: this.notebookId,
             };
 
-            log(`[BetterPlutoServer] Sending get_published_object request: ${requestId}`);
             const encoded = encode(message);
-            socket.send(Buffer.from(encoded));
+            this.transport.send(Buffer.from(encoded));
 
-            // Timeout after 10 seconds
-            setTimeout(() => {
+            this.scheduler.setTimeout(() => {
                 if (this.pendingObjectRequests.has(requestId)) {
                     this.pendingObjectRequests.delete(requestId);
                     reject(new Error('Timeout waiting for published object'));
@@ -939,14 +411,9 @@ export class PlutoServer extends EventEmitter {
         });
     }
 
-    /**
-     * Handle object_result response from Pluto
-     */
     private handleObjectResult(message: Record<string, unknown>): void {
         const requestId = message.request_id as string;
         const body = message.body as Record<string, unknown>;
-
-        log(`[BetterPlutoServer] Received object_result for request: ${requestId}`);
 
         const pending = this.pendingObjectRequests.get(requestId);
         if (pending) {
@@ -960,28 +427,13 @@ export class PlutoServer extends EventEmitter {
         }
     }
 
-    /**
-     * Interrupt all running cells
-     */
     async interruptAll(): Promise<void> {
-        log('[BetterPlutoServer] Interrupting all cells');
         this.sendMessage('interrupt_all', {});
     }
 
-    /**
-     * Add a new cell to the notebook
-     * Note: This only adds the cell_input. The cell_order is managed by Pluto automatically
-     * when the notebook is saved/synced.
-     */
     async addCell(cellId: string, index: number, code: string = ''): Promise<void> {
-        console.log(`[BetterPlutoServer] Adding cell ${cellId} at index ${index}`);
-
-        // First, add the cell to cell_inputs with its full structure
-        // Then add to cell_order
-        // This mimics how Pluto's frontend handles cell addition
         this.sendMessage('update_notebook', {
             updates: [
-                // Add to cell_inputs first
                 {
                     path: ['cell_inputs', cellId],
                     op: 'add',
@@ -994,9 +446,6 @@ export class PlutoServer extends EventEmitter {
                         },
                     },
                 },
-                // Then add to cell_order
-                // Note: We use 'add' with path ending in '-' to append,
-                // or we need to replace the entire array
                 {
                     path: ['cell_order'],
                     op: 'replace',
@@ -1005,29 +454,17 @@ export class PlutoServer extends EventEmitter {
             ],
         });
 
-        // Track this cell as known
         this.knownCellIds.add(cellId);
     }
 
-    /**
-     * Get the current cell order with a new cell inserted at the given index
-     */
     private getCellOrderWithNewCell(cellId: string, index: number): string[] {
         const newOrder = [...this.cellOrder];
-        // Insert at the specified index
         newOrder.splice(index, 0, cellId);
-        // Update our tracked order
         this.cellOrder = newOrder;
         return newOrder;
     }
 
-    /**
-     * Delete a cell from the notebook
-     */
-    async deleteCell(cellId: string, index: number): Promise<void> {
-        console.log(`[BetterPlutoServer] Deleting cell ${cellId} at index ${index}`);
-
-        // Update local tracking first
+    async deleteCell(cellId: string, _index: number): Promise<void> {
         this.cellOrder = this.cellOrder.filter(id => id !== cellId);
         this.knownCellIds.delete(cellId);
 
@@ -1046,13 +483,7 @@ export class PlutoServer extends EventEmitter {
         });
     }
 
-    /**
-     * Delete a cell without updating cell_order
-     * Used when cell order will be updated separately (e.g., during move operations)
-     */
     async deleteCellOnly(cellId: string): Promise<void> {
-        console.log(`[BetterPlutoServer] Deleting cell input only: ${cellId}`);
-
         this.knownCellIds.delete(cellId);
 
         this.sendMessage('update_notebook', {
@@ -1065,117 +496,75 @@ export class PlutoServer extends EventEmitter {
         });
     }
 
-    /**
-     * Get the Pluto cell ID for a VS Code cell ID (handles ID mapping)
-     */
     getPlutoCellId(vscodeCellId: string): string {
         return this.vscodeToPlutoId.get(vscodeCellId) || vscodeCellId;
     }
-    
-    /**
-     * Get the VS Code cell ID for a Pluto cell ID (reverse mapping)
-     */
+
     getVscodeCellId(plutoId: string): string {
         return this.plutoToVscodeId.get(plutoId) || plutoId;
     }
-    
-    /**
-     * Wait for a cell to appear in Pluto's state (via auto-reload from file).
-     * This is used after saving the notebook file with a new cell.
-     * Returns the cell ID once Pluto recognizes it.
-     */
+
     async waitForCellToAppear(cellId: string, code: string = ''): Promise<string> {
-        log(`[BetterPlutoServer] Waiting for cell ${cellId} to appear in Pluto (via file auto-reload)`);
-        
-        // Mark this cell as pending
         this.pendingCellIds.add(cellId);
-        
+
         return new Promise((resolve) => {
             const startTime = Date.now();
-            
-            // Check if cell already exists
+
             if (this.knownCellIds.has(cellId)) {
-                log(`[BetterPlutoServer] Cell ${cellId} already known to Pluto`);
                 this.pendingCellIds.delete(cellId);
                 resolve(cellId);
                 return;
             }
-            
-            // Poll for the cell to appear
-            const checkInterval = setInterval(async () => {
-                // Check if cell appeared in knownCellIds
+
+            const checkInterval = this.scheduler.setInterval(async () => {
                 if (this.knownCellIds.has(cellId)) {
-                    clearInterval(checkInterval);
-                    clearTimeout(timeout);
-                    log(`[BetterPlutoServer] Cell ${cellId} detected in Pluto`);
+                    this.scheduler.clearInterval(checkInterval);
+                    this.scheduler.clearTimeout(timeout);
                     this.pendingCellIds.delete(cellId);
-                    
-                    // Update the cell code to make sure it's correct
+
                     try {
                         await this.updateCell(cellId, code);
-                    } catch (err) {
-                        log(`[BetterPlutoServer] Failed to update cell code: ${err}`);
+                    } catch {
+                        // Best effort.
                     }
-                    
+
                     resolve(cellId);
                     return;
                 }
-                
-                // Request full state periodically to help detect new cells
+
                 if ((Date.now() - startTime) % 1000 < 100) {
                     this.requestFullState();
                 }
             }, 100);
-            
-            // Timeout after 10 seconds
-            const timeout = setTimeout(() => {
-                clearInterval(checkInterval);
-                log(`[BetterPlutoServer] Timeout waiting for cell ${cellId} to appear in Pluto`);
+
+            const timeout = this.scheduler.setTimeout(() => {
+                this.scheduler.clearInterval(checkInterval);
                 this.pendingCellIds.delete(cellId);
-                // Return the original cellId even if not found
                 resolve(cellId);
             }, 10000);
         });
     }
-    
-    /**
-     * Legacy method - redirects to waitForCellToAppear
-     * @deprecated Use waitForCellToAppear instead
-     */
+
     async addCellOnly(cellId: string, code: string = ''): Promise<string> {
         return this.waitForCellToAppear(cellId, code);
     }
 
-    /**
-     * Update cell order (for drag-and-drop reordering)
-     * This sends the new cell_order array to Pluto, triggering reactive re-evaluation
-     */
     async updateCellOrder(newOrder: string[]): Promise<void> {
-        console.log(`[BetterPlutoServer] Updating cell order: ${newOrder.length} cells`);
+        this.cellOrder = [...newOrder];
 
-        // Update local tracking
-        this.cellOrder = newOrder;
-
-        // Send the update to Pluto - this will trigger reactive re-evaluation
         this.sendMessage('update_notebook', {
             updates: [
                 {
                     path: ['cell_order'],
                     op: 'replace',
-                    value: newOrder,
+                    value: this.cellOrder,
                 },
             ],
         });
     }
 
-    /**
-     * Update cell code
-     */
     async updateCell(cellId: string, code: string): Promise<void> {
-        log(`[BetterPlutoServer] updateCell request: ${cellId}, length=${code.length}`);
         if (!this.knownCellIds.has(cellId)) {
-            log(`[BetterPlutoServer] updateCell missing cell_inputs for ${cellId}, using addCellOnly`);
-            // Use addCellOnly which waits for Pluto confirmation
             await this.addCellOnly(cellId, code);
             return;
         }
@@ -1189,56 +578,19 @@ export class PlutoServer extends EventEmitter {
         });
     }
 
-    /**
-     * Check if server is ready
-     */
     get ready(): boolean {
         return this.isReady;
     }
 
-    /**
-     * Stop the server
-     */
     stop(): void {
-        if (this.ws) {
-            this.ws.close();
-            this.ws = null;
+        if (this.transport) {
+            this.transport.close();
+            this.transport = null;
         }
         if (this.process) {
             this.process.kill();
             this.process = null;
         }
         this.isReady = false;
-    }
-
-    /**
-     * Find available port
-     */
-    private async findPort(): Promise<number> {
-        const net = await import('net');
-        return new Promise((resolve, reject) => {
-            const server = net.createServer();
-            server.listen(0, '127.0.0.1', () => {
-                const addr = server.address();
-                if (addr && typeof addr === 'object') {
-                    const port = addr.port;
-                    server.close(() => resolve(port));
-                } else {
-                    reject(new Error('Could not get port'));
-                }
-            });
-            server.on('error', reject);
-        });
-    }
-
-    /**
-     * Generate UUID
-     */
-    private generateId(): string {
-        return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
-            const r = Math.random() * 16 | 0;
-            const v = c === 'x' ? r : (r & 0x3 | 0x8);
-            return v.toString(16);
-        });
     }
 }

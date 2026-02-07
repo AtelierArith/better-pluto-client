@@ -3,7 +3,7 @@
  * Extracted for testability
  */
 
-import { LogEntry } from './PlutoServer';
+import type { ProtocolLogEntry as LogEntry } from './pluto-protocol';
 
 /**
  * Check if a string is a Pluto objectid (12-20 character hex string)
