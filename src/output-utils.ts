@@ -47,7 +47,8 @@ export function buildOutputItems(
     options?: {
         parseError?: (body: string, mime: string) => string;
         addErrorHints?: (body: string) => string;
-        renderTreeAsHtml?: (body: string) => string;
+        renderTreeAsHtml?: (body: string, cellId?: string) => string;
+        cellId?: string;
     }
 ): OutputItem[] {
     const items: OutputItem[] = [];
@@ -96,7 +97,7 @@ export function buildOutputItems(
             const isObjectIdOnly = isPlutoObjectId(cachedOutput.body);
             if (!isObjectIdOnly) {
                 const treeHtml = options?.renderTreeAsHtml
-                    ? options.renderTreeAsHtml(cachedOutput.body)
+                    ? options.renderTreeAsHtml(cachedOutput.body, options?.cellId)
                     : cachedOutput.body;
                 items.push({
                     type: 'text',

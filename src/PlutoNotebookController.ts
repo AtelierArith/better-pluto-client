@@ -38,7 +38,7 @@ class PlutoKernel {
         this.outputAdapter = new VscodeNotebookOutputAdapter({
             parseError: (body, mime) => this.parseErrorOutput(body, mime),
             addErrorHints: (body) => this.addErrorHints(body),
-            renderTreeAsHtml: (body) => this.renderPlutoTreeAsHtml(body),
+            renderTreeAsHtml: (body, cellId) => this.renderPlutoTreeAsHtml(body, cellId),
         });
         this.setupServerEvents();
     }
@@ -230,15 +230,15 @@ class PlutoKernel {
     }
 
     /**
-     * Get a published object (for "show more" in tree views)
+     * Request Pluto to expand tree/table output for a specific object.
      */
-    async getPublishedObject(objectid: string): Promise<unknown> {
+    async reshowCell(cellId: string, objectid: string, dim: number): Promise<void> {
         if (!this._isRunning) {
-            log('[BetterPlutoKernel] Cannot get published object, kernel not running');
-            return null;
+            log('[BetterPlutoKernel] Cannot reshow cell output, kernel not running');
+            return;
         }
-        console.log(`[BetterPlutoKernel] Getting published object: ${objectid}`);
-        return await this.server.getPublishedObject(objectid);
+        console.log(`[BetterPlutoKernel] Reshowing cell output: cell=${cellId}, objectid=${objectid}, dim=${dim}`);
+        await this.server.reshowCell(cellId, objectid, dim);
     }
 
     /**
@@ -1002,7 +1002,7 @@ class PlutoKernel {
      * Render Pluto's tree object as collapsible HTML
      * This creates an interactive tree view identical to Pluto.jl
      */
-    private renderPlutoTreeAsHtml(body: string): string {
+    private renderPlutoTreeAsHtml(body: string, cellId?: string): string {
         // Check if body is just an objectid (hex string)
         if (isPlutoObjectId(body)) {
             return '<span style="color: #888; font-style: italic;">(computing...)</span>';
@@ -1010,7 +1010,7 @@ class PlutoKernel {
 
         try {
             const treeObj = JSON.parse(body);
-            const treeHtml = this.renderPlutoTree(treeObj, true);
+            const treeHtml = this.renderPlutoTree(treeObj, true, cellId);
 
             // Wrap with Pluto-identical styles
             return `
@@ -1180,7 +1180,7 @@ ${treeHtml}`;
     /**
      * Render a Pluto tree node - identical to Pluto.jl TreeView component
      */
-    private renderPlutoTree(obj: unknown, isRoot: boolean = false): string {
+    private renderPlutoTree(obj: unknown, isRoot: boolean = false, cellId?: string): string {
         if (obj === null || obj === undefined) {
             return '<span>nothing</span>';
         }
@@ -1201,28 +1201,31 @@ ${treeHtml}`;
             if (obj.length > 0 && Array.isArray(obj[0]) && obj[0].length === 2) {
                 // Treat as Array type
                 const collapsedClass = isRoot ? '' : ' collapsed';
+                const showMoreAttrs = cellId
+                    ? ` data-cellid="${escapeHtml(cellId)}" data-dim="1"`
+                    : ' data-dim="1"';
                 const renderMimepair = (pair: unknown): string => {
                     if (!Array.isArray(pair) || pair.length !== 2) {
-                        return this.renderPlutoTree(pair, false);
+                        return this.renderPlutoTree(pair, false, cellId);
                     }
                     const [body, mime] = pair;
                     if (mime === 'application/vnd.pluto.tree+object' && body && typeof body === 'object') {
-                        return this.renderPlutoTree(body, false);
+                        return this.renderPlutoTree(body, false, cellId);
                     }
                     if (typeof body === 'string') {
                         return `<span>${escapeHtml(body)}</span>`;
                     }
-                    return this.renderPlutoTree(body, false);
+                    return this.renderPlutoTree(body, false, cellId);
                 };
                 const renderMoreDirect = (r: unknown): string => {
                     if (r === 'more') {
-                        return '<pluto-tree-more>show more</pluto-tree-more>';
+                        return `<pluto-tree-more${showMoreAttrs}>show more</pluto-tree-more>`;
                     }
                     if (r && typeof r === 'object' && !Array.isArray(r)) {
                         const moreObj = r as Record<string, unknown>;
                         if (moreObj.head === 'more' && moreObj.objectid) {
                             const oid = escapeHtml(String(moreObj.objectid));
-                            return `<pluto-tree-more data-objectid="${oid}">show more</pluto-tree-more>`;
+                            return `<pluto-tree-more data-objectid="${oid}"${showMoreAttrs}>show more</pluto-tree-more>`;
                         }
                     }
                     return '';
@@ -1249,16 +1252,16 @@ ${treeHtml}`;
         // Mimepair output helper
         const mimepairOutput = (pair: unknown): string => {
             if (!Array.isArray(pair) || pair.length !== 2) {
-                return this.renderPlutoTree(pair, false);
+                return this.renderPlutoTree(pair, false, cellId);
             }
             const [body, mime] = pair;
             if (mime === 'application/vnd.pluto.tree+object' && body && typeof body === 'object') {
-                return this.renderPlutoTree(body, false);
+                return this.renderPlutoTree(body, false, cellId);
             }
             if (typeof body === 'string') {
                 return `<span>${escapeHtml(body)}</span>`;
             }
-            return this.renderPlutoTree(body, false);
+            return this.renderPlutoTree(body, false, cellId);
         };
 
         const plutoType = record.type as string | undefined;
@@ -1287,17 +1290,20 @@ ${treeHtml}`;
             const prefixHtml = `<pluto-tree-prefix><span class="long">${escapeHtml(prefix || '')}</span><span class="short">${escapeHtml(prefixShort || prefix || '')}</span></pluto-tree-prefix>`;
 
             let itemsHtml = '';
+            const showMoreAttrs = cellId
+                ? ` data-cellid="${escapeHtml(cellId)}" data-dim="1"`
+                : ' data-dim="1"';
 
             // Helper to render "more" marker with objectid
             const renderMore = (r: unknown): string => {
                 if (r === 'more') {
-                    return '<pluto-tree-more>show more</pluto-tree-more>';
+                    return `<pluto-tree-more${showMoreAttrs}>show more</pluto-tree-more>`;
                 }
                 if (r && typeof r === 'object' && !Array.isArray(r)) {
                     const obj = r as Record<string, unknown>;
                     if (obj.head === 'more' && obj.objectid) {
                         const oid = escapeHtml(String(obj.objectid));
-                        return `<pluto-tree-more data-objectid="${oid}">show more</pluto-tree-more>`;
+                        return `<pluto-tree-more data-objectid="${oid}"${showMoreAttrs}>show more</pluto-tree-more>`;
                     }
                 }
                 return '';
@@ -1599,21 +1605,19 @@ export class PlutoNotebookController implements vscode.Disposable {
     }
 
     /**
-     * Get a published object from Pluto (for "show more" in tree views)
+     * Ask Pluto to expand a tree/table output segment.
      */
-    async getPublishedObject(notebook: vscode.NotebookDocument, objectid: string): Promise<void> {
+    async reshowCell(notebook: vscode.NotebookDocument, cellId: string, objectid: string, dim: number): Promise<void> {
         const key = notebook.uri.toString();
         const kernel = this.kernels.get(key);
         if (kernel && kernel.isRunning) {
             try {
-                const result = await kernel.getPublishedObject(objectid);
-                log(`[BetterPlutoController] Got published object: ${JSON.stringify(result).substring(0, 200)}`);
-                // TODO: Update the cell output with the expanded data
+                await kernel.reshowCell(cellId, objectid, dim);
             } catch (error) {
-                console.error('[BetterPlutoController] Failed to get published object:', error);
+                console.error('[BetterPlutoController] Failed to reshow cell output:', error);
             }
         } else {
-            log('[BetterPlutoController] Cannot get published object, kernel not running');
+            log('[BetterPlutoController] Cannot reshow cell output, kernel not running');
         }
     }
 

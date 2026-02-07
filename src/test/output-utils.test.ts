@@ -215,6 +215,23 @@ suite('Output Utils - buildOutputItems', () => {
         assert.strictEqual(items[0].mime, 'application/vnd.pluto.html+html');
     });
 
+    test('passes cellId to renderTreeAsHtml callback', () => {
+        const cached: CachedOutput = {
+            body: '{"type":"Array","elements":[[0,["1","text/plain"]]]}',
+            mime: 'application/vnd.pluto.tree+object'
+        };
+        let receivedCellId: string | undefined;
+        const items = buildOutputItems(cached, {
+            cellId: 'cell-123',
+            renderTreeAsHtml: (body, cellId) => {
+                receivedCellId = cellId;
+                return body;
+            }
+        });
+        assert.strictEqual(receivedCellId, 'cell-123');
+        assert.strictEqual(items.length, 1);
+    });
+
     test('combines logs and body output', () => {
         const cached: CachedOutput = {
             body: '42',

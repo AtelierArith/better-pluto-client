@@ -8,17 +8,18 @@ export interface NotebookOutputAdapter {
 interface NotebookOutputAdapterOptions {
     parseError: (body: string, mime: string) => string;
     addErrorHints: (body: string) => string;
-    renderTreeAsHtml: (body: string) => string;
+    renderTreeAsHtml: (body: string, cellId?: string) => string;
 }
 
 export class VscodeNotebookOutputAdapter implements NotebookOutputAdapter {
     constructor(private readonly options: NotebookOutputAdapterOptions) {}
 
-    toNotebookOutputs(_cellId: string, cachedOutput: CachedOutput): vscode.NotebookCellOutput[] {
+    toNotebookOutputs(cellId: string, cachedOutput: CachedOutput): vscode.NotebookCellOutput[] {
         const items = buildOutputItems(cachedOutput, {
             parseError: this.options.parseError,
             addErrorHints: this.options.addErrorHints,
             renderTreeAsHtml: this.options.renderTreeAsHtml,
+            cellId,
         });
 
         const outputs: vscode.NotebookCellOutput[] = [];
