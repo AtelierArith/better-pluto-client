@@ -1,9 +1,11 @@
 import { isPlutoObjectId } from './output-utils';
 
 export interface ProtocolLogEntry {
+    id?: string;
     level: string;
     msg: string;
     line?: number;
+    kwargs?: Array<[string, unknown]>;
 }
 
 export interface ProtocolCellOutput {
@@ -114,6 +116,8 @@ export function extractSingleLog(logObj: Record<string, unknown>): ProtocolLogEn
     let msg = '';
     if (Array.isArray(logObj.msg) && logObj.msg.length > 0) {
         msg = String(logObj.msg[0] || '');
+    } else if (typeof logObj.msg === 'string') {
+        msg = logObj.msg;
     }
 
     if (!msg) {
@@ -121,9 +125,11 @@ export function extractSingleLog(logObj: Record<string, unknown>): ProtocolLogEn
     }
 
     return {
+        id: typeof logObj.id === 'string' ? logObj.id : undefined,
         level,
         msg,
         line: logObj.line as number | undefined,
+        kwargs: Array.isArray(logObj.kwargs) ? logObj.kwargs as Array<[string, unknown]> : undefined,
     };
 }
 
@@ -305,19 +311,30 @@ export function processNotebookDiff(
             continue;
         }
 
-        if (path.length === 2 && patch.op === 'replace') {
+        if (path.length === 2 && (patch.op === 'replace' || patch.op === 'add')) {
             handleCellResult(cellId, patch.value as Record<string, unknown>, nextState, events);
+            continue;
+        }
+        if (path.length === 2 && patch.op === 'remove') {
+            nextState.cellOutputs.delete(cellId);
+            events.push({
+                cellId,
+                state: {
+                    cellId,
+                    output: { body: '', mime: 'text/plain' },
+                },
+            });
             continue;
         }
 
         const field = path[2] as string;
         if (field === 'output' && path.length >= 4) {
             const subField = path[3] as string;
-            handleOutputSubField(cellId, subField, patch.value, nextState, events);
+            handleOutputSubField(cellId, subField, patch.op, patch.value, nextState, events);
             continue;
         }
 
-        handleCellField(cellId, field, patch.value, nextState, events);
+        handleCellField(cellId, field, patch.op, patch.value, nextState, events);
     }
 
     return {
@@ -381,6 +398,7 @@ function handleCellResult(
 function handleCellField(
     cellId: string,
     field: string,
+    op: string,
     value: unknown,
     state: ProtocolRuntimeState,
     events: ProtocolCellStateEvent[]
@@ -396,6 +414,12 @@ function handleCellField(
     } else if (field === 'runtime') {
         cellState.runtime = value as number;
     } else if (field === 'output') {
+        if (op === 'remove') {
+            state.cellOutputs.delete(cellId);
+            cellState.output = { body: '', mime: 'text/plain' };
+            events.push({ cellId, state: cellState });
+            return;
+        }
         const output = extractOutput(value as Record<string, unknown>);
         cellState.output = output;
         state.cellOutputs.set(cellId, output);
@@ -418,6 +442,7 @@ function handleCellField(
 function handleOutputSubField(
     cellId: string,
     subField: string,
+    op: string,
     value: unknown,
     state: ProtocolRuntimeState,
     events: ProtocolCellStateEvent[]
@@ -425,6 +450,9 @@ function handleOutputSubField(
     const output = state.cellOutputs.get(cellId) || { body: '', mime: 'text/plain' };
 
     if (subField === 'body') {
+        if (op === 'remove') {
+            output.body = '';
+        } else {
         const decodedBody = tryDecodeMsgpackBinary(value, output.mime || 'text/plain');
         let newBody: string | undefined;
 
@@ -449,8 +477,13 @@ function handleOutputSubField(
         if (newBody !== undefined) {
             output.body = newBody;
         }
+        }
     } else if (subField === 'mime') {
-        output.mime = value as string;
+        if (op === 'remove') {
+            output.mime = 'text/plain';
+        } else {
+            output.mime = value as string;
+        }
     } else if (subField === 'last_run_timestamp') {
         events.push({
             cellId,
@@ -461,6 +494,12 @@ function handleOutputSubField(
         });
         return;
     } else if (subField.includes('/')) {
+        if (op === 'remove') {
+            if (output.mime === subField) {
+                output.mime = 'text/plain';
+                output.body = '';
+            }
+        } else {
         const decodedBody = tryDecodeMsgpackBinary(value, subField);
         let newBody: string | undefined;
         if (decodedBody !== null) {
@@ -478,6 +517,7 @@ function handleOutputSubField(
         if (newBody !== undefined) {
             output.mime = subField;
             output.body = newBody;
+        }
         }
     } else {
         return;

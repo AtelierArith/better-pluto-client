@@ -32,10 +32,16 @@ suite('pluto-protocol', () => {
 
     test('extractLogs supports object format', () => {
         const logs = extractLogs({
-            a: { level: 'LogLevel(-555)', msg: ['hello\n', 'text/plain'] }
+            a: { id: 'log-1', level: 'LogLevel(-555)', msg: ['hello\n', 'text/plain'], kwargs: [['progress', ['0.3', 'text/plain']]] }
         });
 
-        assert.deepStrictEqual(logs, [{ level: 'LogLevel(-555)', msg: 'hello\n', line: undefined }]);
+        assert.deepStrictEqual(logs, [{
+            id: 'log-1',
+            level: 'LogLevel(-555)',
+            msg: 'hello\n',
+            line: undefined,
+            kwargs: [['progress', ['0.3', 'text/plain']]]
+        }]);
     });
 
     test('processNotebookDiff avoids objectid-only overwrite for tree output', () => {
@@ -113,5 +119,26 @@ suite('pluto-protocol', () => {
         const resB = processNotebookDiff(msgB as Record<string, unknown>, createState());
 
         assert.deepStrictEqual(resA.nextState.cellOutputs.get('cell-1'), resB.nextState.cellOutputs.get('cell-1'));
+    });
+
+    test('processNotebookDiff handles remove op on output body', () => {
+        const state = createState();
+        state.cellOutputs.set('cell-1', {
+            mime: 'text/plain',
+            body: 'hello'
+        });
+
+        const result = processNotebookDiff({
+            type: 'notebook_diff',
+            message: {
+                patches: [
+                    { op: 'remove', path: ['cell_results', 'cell-1', 'output', 'body'] },
+                ]
+            }
+        }, state);
+
+        assert.strictEqual(result.nextState.cellOutputs.get('cell-1')?.body, '');
+        assert.strictEqual(result.events.length, 1);
+        assert.strictEqual(result.events[0].state.output?.body, '');
     });
 });
