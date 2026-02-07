@@ -837,7 +837,9 @@ class PlutoKernel {
 
                         // Rebuild and show the cached output
                         const outputs = this.buildOutputsFromCache(cellId, cachedOutput);
-                        stillPending.replaceOutput(outputs);
+                        if (outputs.length > 0) {
+                            stillPending.replaceOutput(outputs);
+                        }
                         stillPending.end(true, Date.now());
                         this.cellExecutions.delete(cellId);
                         this.cellExecStates.delete(cellId);
