@@ -71,6 +71,19 @@ suite('Output Utils - buildOutputItems', () => {
         assert.strictEqual(items[0].content, 'Hello\nWorld\n');
     });
 
+    test('ignores non-stdout logs in stdout rendering', () => {
+        const cached: CachedOutput = {
+            logs: [
+                { level: 'LogLevel(-1)', msg: 'progress\n' },
+                { level: 'LogLevel(-555)', msg: 'stdout\n' }
+            ]
+        };
+        const items = buildOutputItems(cached);
+        assert.strictEqual(items.length, 1);
+        assert.strictEqual(items[0].type, 'stdout');
+        assert.strictEqual(items[0].content, 'stdout\n');
+    });
+
     test('builds text/html output with custom mime type', () => {
         const cached: CachedOutput = {
             body: '<div class="markdown"><h1>Hello</h1></div>',
@@ -94,7 +107,7 @@ suite('Output Utils - buildOutputItems', () => {
         assert.strictEqual(items[0].mime, 'text/plain');
     });
 
-    test('treats text/plain that looks like HTML as HTML', () => {
+    test('keeps text/plain as text even when it looks like HTML', () => {
         const cached: CachedOutput = {
             body: '<div>HTML content</div>',
             mime: 'text/plain'
@@ -102,7 +115,7 @@ suite('Output Utils - buildOutputItems', () => {
         const items = buildOutputItems(cached);
         assert.strictEqual(items.length, 1);
         assert.strictEqual(items[0].type, 'text');
-        assert.strictEqual(items[0].mime, 'application/vnd.pluto.html+html');
+        assert.strictEqual(items[0].mime, 'text/plain');
     });
 
     test('builds SVG output', () => {
@@ -206,7 +219,7 @@ suite('Output Utils - buildOutputItems', () => {
         const cached: CachedOutput = {
             body: '42',
             mime: 'text/plain',
-            logs: [{ level: '', msg: 'Debug output\n' }]
+            logs: [{ level: 'LogLevel(-555)', msg: 'Debug output\n' }]
         };
         const items = buildOutputItems(cached);
         assert.strictEqual(items.length, 2);
@@ -269,7 +282,7 @@ suite('Output Utils - Race Condition Scenario', () => {
     test('empty body but with logs still produces output', () => {
         // Sometimes output may arrive as logs only initially
         const cached: CachedOutput = {
-            logs: [{ level: '', msg: 'Compiling packages...\n' }]
+            logs: [{ level: 'LogLevel(-555)', msg: 'Compiling packages...\n' }]
         };
 
         const items = buildOutputItems(cached);
