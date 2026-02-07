@@ -119,7 +119,9 @@ This extension reads and writes standard Pluto.jl notebook files (`.jl`), which 
 - `src/cell-state-machine.ts`: execution state accumulation and completion rules (pure logic)
 - `src/PlutoNotebookParser.ts`: parse/serialize Pluto `.jl` notebook format
 - `src/PlutoNotebookSerializer.ts`: VS Code `NotebookData` <-> Pluto parser bridge
+- `src/notebook-output-adapter.ts`: notebook output and VS Code API bridge
 - `src/output-utils.ts`: output classification and rendering helpers
+- `src/pluto-toc-utils.ts`: table-of-contents and output structure helpers
 - `src/pluto-renderer.ts`: webview renderer for interactive HTML outputs
 
 ### Examples
