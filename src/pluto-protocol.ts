@@ -51,6 +51,35 @@ const RICH_OUTPUT_MIME_ORDER = [
     'text/plain',
 ];
 
+function decodeOutputBody(value: unknown, mime: string): string {
+    const decoded = tryDecodeMsgpackBinary(value, mime);
+    if (decoded !== null) {
+        return decoded;
+    }
+    if (typeof value === 'string') {
+        return value;
+    }
+    if (value instanceof Uint8Array || ArrayBuffer.isView(value)) {
+        const bytes = value instanceof Uint8Array ? value : new Uint8Array((value as ArrayBufferView).buffer);
+        return mime.startsWith('image/') && mime !== 'image/svg+xml'
+            ? Buffer.from(bytes).toString('base64')
+            : Buffer.from(bytes).toString('utf-8');
+    }
+    if (Array.isArray(value)) {
+        if (value.every((v: unknown) => typeof v === 'number')) {
+            const bytes = new Uint8Array(value as number[]);
+            return mime.startsWith('image/') && mime !== 'image/svg+xml'
+                ? Buffer.from(bytes).toString('base64')
+                : Buffer.from(bytes).toString('utf-8');
+        }
+        return JSON.stringify(value);
+    }
+    if (value !== null && typeof value === 'object') {
+        return JSON.stringify(value);
+    }
+    return '';
+}
+
 export function tryDecodeMsgpackBinary(body: unknown, mime: string): string | null {
     if (body instanceof Uint8Array || Buffer.isBuffer(body)) {
         const bytes = body instanceof Uint8Array ? body : new Uint8Array(body);
@@ -155,66 +184,31 @@ export function extractOutput(output: Record<string, unknown>): ProtocolCellOutp
 
     const hasBody = output.body !== undefined;
     const mimeFromShape = (output.mime as string) || 'text/plain';
-    if (hasBody) {
-        let body = '';
-        const mime = mimeFromShape;
-        const rawBody = output.body;
-        const decodedBody = tryDecodeMsgpackBinary(rawBody, mime);
-        if (decodedBody !== null) {
-            body = decodedBody;
-        } else if (typeof rawBody === 'string') {
-            body = rawBody;
-        } else if (rawBody instanceof Uint8Array || ArrayBuffer.isView(rawBody)) {
-            const bytes = rawBody instanceof Uint8Array ? rawBody : new Uint8Array((rawBody as ArrayBufferView).buffer);
-            body = mime.startsWith('image/') && mime !== 'image/svg+xml'
-                ? Buffer.from(bytes).toString('base64')
-                : Buffer.from(bytes).toString('utf-8');
-        } else if (Array.isArray(rawBody)) {
-            if (rawBody.every((v: unknown) => typeof v === 'number')) {
-                const bytes = new Uint8Array(rawBody as number[]);
-                body = mime.startsWith('image/') && mime !== 'image/svg+xml'
-                    ? Buffer.from(bytes).toString('base64')
-                    : Buffer.from(bytes).toString('utf-8');
-            } else {
-                body = JSON.stringify(rawBody);
-            }
-        } else if (rawBody && typeof rawBody === 'object') {
-            body = JSON.stringify(rawBody);
+    const hasPreferredRichMime = RICH_OUTPUT_MIME_ORDER
+        .filter((mime) => mime !== 'text/plain')
+        .some((mime) => output[mime] !== undefined);
+
+    for (const mime of RICH_OUTPUT_MIME_ORDER) {
+        if (mime === 'text/plain' && hasBody && mimeFromShape === 'text/plain' && hasPreferredRichMime) {
+            // Prefer richer mime variants over plain body/mime tuples.
+            continue;
         }
+        const value = output[mime];
+        if (value === undefined) {
+            continue;
+        }
+
+        const body = decodeOutputBody(value, mime);
 
         if (body) {
             return { body, mime };
         }
     }
 
-    for (const mime of RICH_OUTPUT_MIME_ORDER) {
-        const value = output[mime];
-        if (value === undefined) {
-            continue;
-        }
-
-        let body = '';
-        const decoded = tryDecodeMsgpackBinary(value, mime);
-        if (decoded !== null) {
-            body = decoded;
-        } else if (typeof value === 'string') {
-            body = value;
-        } else if (value instanceof Uint8Array || ArrayBuffer.isView(value)) {
-            const bytes = value instanceof Uint8Array ? value : new Uint8Array((value as ArrayBufferView).buffer);
-            body = mime.startsWith('image/') && mime !== 'image/svg+xml'
-                ? Buffer.from(bytes).toString('base64')
-                : Buffer.from(bytes).toString('utf-8');
-        } else if (Array.isArray(value) && value.every((v: unknown) => typeof v === 'number')) {
-            const bytes = new Uint8Array(value as number[]);
-            body = mime.startsWith('image/') && mime !== 'image/svg+xml'
-                ? Buffer.from(bytes).toString('base64')
-                : Buffer.from(bytes).toString('utf-8');
-        } else if (value !== null && typeof value === 'object') {
-            body = JSON.stringify(value);
-        }
-
+    if (hasBody) {
+        const body = decodeOutputBody(output.body, mimeFromShape);
         if (body) {
-            return { body, mime };
+            return { body, mime: mimeFromShape };
         }
     }
 

@@ -30,6 +30,24 @@ suite('pluto-protocol', () => {
         assert.strictEqual(output.body, '<div>HTML</div>');
     });
 
+    test('extractOutput prefers tree+object over plain body/mime fallback', () => {
+        const output = extractOutput({
+            mime: 'text/plain',
+            body: 'Dict',
+            'application/vnd.pluto.tree+object': {
+                type: 'Dict',
+                prefix: 'Dict',
+                prefix_short: 'Dict',
+                elements: [
+                    [['a', 'text/plain'], ['1', 'text/plain']],
+                    [['b', 'text/plain'], ['2', 'text/plain']],
+                ],
+            },
+        });
+        assert.strictEqual(output.mime, 'application/vnd.pluto.tree+object');
+        assert.ok(output.body.includes('"type":"Dict"'));
+    });
+
     test('extractLogs supports object format', () => {
         const logs = extractLogs({
             a: { id: 'log-1', level: 'LogLevel(-555)', msg: ['hello\n', 'text/plain'], kwargs: [['progress', ['0.3', 'text/plain']]] }
