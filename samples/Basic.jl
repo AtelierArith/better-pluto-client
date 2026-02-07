@@ -14,6 +14,7 @@ hello("Me")
 begin
     z = 3x + y
     println(z)
+    2z
 end
 
 # ╔═╡ ff39c404-95e6-4efc-b0a8-be880f65e4fe
