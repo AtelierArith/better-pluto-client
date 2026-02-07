@@ -80,6 +80,73 @@ function decodeOutputBody(value: unknown, mime: string): string {
     return '';
 }
 
+function parseJsonSafe(value: string): unknown | null {
+    try {
+        return JSON.parse(value);
+    } catch {
+        return null;
+    }
+}
+
+function setNestedValue(target: unknown, path: (string | number)[], value: unknown): unknown {
+    if (path.length === 0) {
+        return value;
+    }
+    if (target === null || target === undefined || typeof target !== 'object') {
+        target = typeof path[0] === 'number' ? [] : {};
+    }
+
+    const [head, ...rest] = path;
+    if (Array.isArray(target)) {
+        const index = typeof head === 'number' ? head : Number(head);
+        if (!Number.isFinite(index)) {
+            return target;
+        }
+        while (target.length <= index) {
+            target.push(undefined);
+        }
+        target[index] = setNestedValue(target[index], rest, value);
+        return target;
+    }
+
+    const obj = target as Record<string, unknown>;
+    const key = String(head);
+    obj[key] = setNestedValue(obj[key], rest, value);
+    return obj;
+}
+
+function deleteNestedValue(target: unknown, path: (string | number)[]): unknown {
+    if (target === null || target === undefined || typeof target !== 'object' || path.length === 0) {
+        return target;
+    }
+
+    const [head, ...rest] = path;
+    if (Array.isArray(target)) {
+        const index = typeof head === 'number' ? head : Number(head);
+        if (!Number.isFinite(index) || index < 0 || index >= target.length) {
+            return target;
+        }
+        if (rest.length === 0) {
+            target.splice(index, 1);
+            return target;
+        }
+        target[index] = deleteNestedValue(target[index], rest);
+        return target;
+    }
+
+    const obj = target as Record<string, unknown>;
+    const key = String(head);
+    if (!(key in obj)) {
+        return target;
+    }
+    if (rest.length === 0) {
+        delete obj[key];
+        return target;
+    }
+    obj[key] = deleteNestedValue(obj[key], rest);
+    return target;
+}
+
 export function tryDecodeMsgpackBinary(body: unknown, mime: string): string | null {
     if (body instanceof Uint8Array || Buffer.isBuffer(body)) {
         const bytes = body instanceof Uint8Array ? body : new Uint8Array(body);
@@ -323,8 +390,8 @@ export function processNotebookDiff(
 
         const field = path[2] as string;
         if (field === 'output' && path.length >= 4) {
-            const subField = path[3] as string;
-            handleOutputSubField(cellId, subField, patch.op, patch.value, nextState, events);
+            const outputPath = path.slice(3);
+            handleOutputSubField(cellId, outputPath, patch.op, patch.value, nextState, events);
             continue;
         }
 
@@ -435,42 +502,66 @@ function handleCellField(
 
 function handleOutputSubField(
     cellId: string,
-    subField: string,
+    outputPath: (string | number)[],
     op: string,
     value: unknown,
     state: ProtocolRuntimeState,
     events: ProtocolCellStateEvent[]
 ): void {
+    if (outputPath.length === 0) {
+        return;
+    }
+    const subField = String(outputPath[0]);
+    const tailPath = outputPath.slice(1);
     const output = state.cellOutputs.get(cellId) || { body: '', mime: 'text/plain' };
 
     if (subField === 'body') {
         if (op === 'remove') {
-            output.body = '';
-        } else {
-        const decodedBody = tryDecodeMsgpackBinary(value, output.mime || 'text/plain');
-        let newBody: string | undefined;
-
-        if (decodedBody !== null) {
-            newBody = decodedBody;
-        } else if (typeof value === 'string') {
-            newBody = value;
-        } else if (value && typeof value === 'object') {
-            const obj = value as Record<string, unknown>;
-            if (obj.msg) {
-                newBody = obj.msg as string;
+            if (tailPath.length === 0) {
+                output.body = '';
             } else {
-                newBody = JSON.stringify(value);
+                const parsed = typeof output.body === 'string' ? parseJsonSafe(output.body) : null;
+                if (parsed !== null) {
+                    const next = deleteNestedValue(parsed, tailPath);
+                    output.body = JSON.stringify(next);
+                }
             }
-        }
+        } else {
+            let newBody: string | undefined;
+            if (tailPath.length > 0) {
+                const parsed = typeof output.body === 'string' ? parseJsonSafe(output.body) : null;
+                if (parsed !== null) {
+                    const next = setNestedValue(parsed, tailPath, value);
+                    newBody = JSON.stringify(next);
+                } else {
+                    const base = typeof tailPath[0] === 'number' ? [] : {};
+                    const next = setNestedValue(base, tailPath, value);
+                    newBody = JSON.stringify(next);
+                }
+            } else {
+                const decodedBody = tryDecodeMsgpackBinary(value, output.mime || 'text/plain');
+                if (decodedBody !== null) {
+                    newBody = decodedBody;
+                } else if (typeof value === 'string') {
+                    newBody = value;
+                } else if (value && typeof value === 'object') {
+                    const obj = value as Record<string, unknown>;
+                    if (obj.msg) {
+                        newBody = obj.msg as string;
+                    } else {
+                        newBody = JSON.stringify(value);
+                    }
+                }
+            }
 
-        const isObjectIdOnly = output.mime === 'application/vnd.pluto.tree+object' && isPlutoObjectId(newBody);
-        if (isObjectIdOnly && output.body && output.body.length > 20) {
-            return;
-        }
+            const isObjectIdOnly = output.mime === 'application/vnd.pluto.tree+object' && isPlutoObjectId(newBody);
+            if (isObjectIdOnly && output.body && output.body.length > 20) {
+                return;
+            }
 
-        if (newBody !== undefined) {
-            output.body = newBody;
-        }
+            if (newBody !== undefined) {
+                output.body = newBody;
+            }
         }
     } else if (subField === 'mime') {
         if (op === 'remove') {
