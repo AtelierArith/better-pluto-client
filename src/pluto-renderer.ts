@@ -70,7 +70,8 @@ function setupMathJax(): Promise<void> {
             // Configure MathJax before loading the script
             setMathJaxConfig({
                 options: {
-                    ignoreHtmlClass: "no-MathJax",
+                    // Match Pluto frontend; the alpha/theta avoids accidental collisions.
+                    ignoreHtmlClass: "no-MαθJax",
                     processHtmlClass: "tex",  // Process elements with class "tex"
                 },
                 tex: {
@@ -87,6 +88,28 @@ function setupMathJax(): Promise<void> {
                         console.log('[PlutoRenderer] MathJax is ready');
                         try {
                             getMathJax()?.startup?.defaultReady?.();
+                            // Pluto compatibility shim: some libraries still call MathJax v2 APIs.
+                            const mj = getMathJax() as any;
+                            if (mj) {
+                                mj.Hub = {
+                                    Queue: function (...args: unknown[]) {
+                                        for (const arg of args) {
+                                            const fn = mj.Callback ? mj.Callback(arg) : arg;
+                                            if (typeof fn === 'function' && mj.startup?.promise) {
+                                                mj.startup.promise = mj.startup.promise.then(fn);
+                                            }
+                                        }
+                                        return mj.startup?.promise;
+                                    },
+                                    Typeset: function (elements: Element[], callback?: () => void) {
+                                        let promise = mj.typesetPromise ? mj.typesetPromise(elements) : Promise.resolve();
+                                        if (callback) {
+                                            promise = promise.then(callback);
+                                        }
+                                        return promise;
+                                    },
+                                };
+                            }
                         } catch (e) {
                             console.warn('[PlutoRenderer] MathJax defaultReady error:', e);
                         }

@@ -35,6 +35,8 @@ export interface OutputItem {
     mime?: string;
 }
 
+const STDOUT_LOG_LEVEL = 'LogLevel(-555)';
+
 /**
  * Build output items from cached output data
  * This is the core logic extracted from PlutoKernel.buildOutputsFromCache
@@ -53,6 +55,7 @@ export function buildOutputItems(
     // Add logs (stdout) if present
     if (cachedOutput.logs && cachedOutput.logs.length > 0) {
         const stdoutLogs = cachedOutput.logs
+            .filter((logEntry) => logEntry.level === STDOUT_LOG_LEVEL)
             .map(logEntry => logEntry.msg)
             .join('');
 
@@ -146,20 +149,11 @@ export function buildOutputItems(
                 });
             }
         } else if (mime === 'text/plain') {
-            // Check if it's actually HTML content that was mislabeled
-            if (cachedOutput.body.trim().startsWith('<')) {
-                items.push({
-                    type: 'text',
-                    content: cachedOutput.body,
-                    mime: 'application/vnd.pluto.html+html'
-                });
-            } else {
-                items.push({
-                    type: 'text',
-                    content: cachedOutput.body,
-                    mime: 'text/plain'
-                });
-            }
+            items.push({
+                type: 'text',
+                content: cachedOutput.body,
+                mime: 'text/plain'
+            });
         } else {
             items.push({
                 type: 'text',
