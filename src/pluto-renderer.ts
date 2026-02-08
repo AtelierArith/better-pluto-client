@@ -205,6 +205,14 @@ export function activate(context: RendererContext<void>) {
         async renderOutputItem(outputItem: OutputItem, element: HTMLElement) {
             const html = outputItem.text();
 
+            // Abort previous event listeners to prevent leaks
+            const prevController = (element as any).__abortController as AbortController | undefined;
+            if (prevController) {
+                prevController.abort();
+            }
+            const abortController = new AbortController();
+            (element as any).__abortController = abortController;
+
             // Disconnect previous IntersectionObservers to prevent leaks
             const prevObservers = (element as any).__tocObservers as IntersectionObserver[] | undefined;
             if (prevObservers) {
@@ -226,7 +234,7 @@ export function activate(context: RendererContext<void>) {
             container.innerHTML = sanitizeHtml(html);
 
             // Find and setup interactive elements
-            setupInteractiveElements(container, context);
+            setupInteractiveElements(container, context, abortController.signal);
 
             // Clear previous content and add new
             element.innerHTML = '';
@@ -759,7 +767,7 @@ async function executeScripts(container: HTMLElement): Promise<void> {
 /**
  * Setup event listeners for interactive Pluto elements
  */
-function setupInteractiveElements(container: HTMLElement, context: RendererContext<void>) {
+function setupInteractiveElements(container: HTMLElement, context: RendererContext<void>, signal: AbortSignal) {
     // Find all input elements that might be bound
     const inputs = container.querySelectorAll('input, select, textarea');
 
@@ -772,7 +780,7 @@ function setupInteractiveElements(container: HTMLElement, context: RendererConte
 
         if (bondName) {
             console.log(`[PlutoRenderer] Found bond: ${bondName}`);
-            setupBondListener(inputEl, bondName, context);
+            setupBondListener(inputEl, bondName, context, signal);
         }
     });
 
@@ -784,23 +792,23 @@ function setupInteractiveElements(container: HTMLElement, context: RendererConte
             console.log(`[PlutoRenderer] Found <bond> element: ${bondName}`);
             const input = bondEl.querySelector('input, select, textarea');
             if (input) {
-                setupBondListener(input as HTMLInputElement, bondName, context);
+                setupBondListener(input as HTMLInputElement, bondName, context, signal);
             }
         }
     });
 
     // Handle Pluto's standard HTML structure for sliders
     // PlutoUI wraps inputs in specific structures
-    setupPlutoUISliders(container, context);
+    setupPlutoUISliders(container, context, signal);
 
     // Handle PlutoUI Clock widgets
-    setupPlutoUIClock(container, context);
+    setupPlutoUIClock(container, context, signal);
 
     // Handle "show more" buttons in tree views
-    setupShowMoreButtons(container, context);
+    setupShowMoreButtons(container, context, signal);
 
     // Handle tree collapse/expand
-    setupTreeCollapse(container);
+    setupTreeCollapse(container, signal);
 }
 
 /**
@@ -822,7 +830,8 @@ function findBondName(input: HTMLInputElement | HTMLSelectElement | HTMLTextArea
 function setupBondListener(
     input: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement,
     bondName: string,
-    context: RendererContext<void>
+    context: RendererContext<void>,
+    signal: AbortSignal
 ) {
     const sendValue = () => {
         const value = getInputValue(input);
@@ -838,9 +847,9 @@ function setupBondListener(
         }
     };
 
-    // Listen for input events
-    input.addEventListener('input', sendValue);
-    input.addEventListener('change', sendValue);
+    // Listen for input events (auto-removed when signal is aborted)
+    input.addEventListener('input', sendValue, { signal });
+    input.addEventListener('change', sendValue, { signal });
 }
 
 /**
@@ -877,7 +886,7 @@ function getInputValue(input: HTMLInputElement | HTMLSelectElement | HTMLTextAre
  * PlutoUI generates HTML like:
  * <bond def="varname"><input type="range" ...></bond>
  */
-function setupPlutoUISliders(container: HTMLElement, context: RendererContext<void>) {
+function setupPlutoUISliders(container: HTMLElement, context: RendererContext<void>, signal: AbortSignal) {
     // Find range inputs (sliders)
     const rangeInputs = container.querySelectorAll('input[type="range"]');
 
@@ -885,11 +894,11 @@ function setupPlutoUISliders(container: HTMLElement, context: RendererContext<vo
         const rangeInput = input as HTMLInputElement;
 
         // Try to find the bond name from parent elements
-        let bondName = findBondNameFromParents(rangeInput);
+        const bondName = findBondNameFromParents(rangeInput);
 
         if (bondName) {
             console.log(`[PlutoRenderer] Setting up slider for bond: ${bondName}`);
-            setupBondListener(rangeInput, bondName, context);
+            setupBondListener(rangeInput, bondName, context, signal);
         } else {
             // If no bond name found, try to extract from surrounding HTML
             // PlutoUI often includes the variable name in span elements
@@ -903,7 +912,7 @@ function setupPlutoUISliders(container: HTMLElement, context: RendererContext<vo
  * Setup handlers for PlutoUI Clock widgets
  * Clock uses a custom <plutoui-clock> element that fires 'input' events
  */
-function setupPlutoUIClock(container: HTMLElement, context: RendererContext<void>) {
+function setupPlutoUIClock(container: HTMLElement, context: RendererContext<void>, signal: AbortSignal) {
     const clocks = container.querySelectorAll('plutoui-clock');
 
     clocks.forEach((clock) => {
@@ -915,7 +924,7 @@ function setupPlutoUIClock(container: HTMLElement, context: RendererContext<void
         if (bondName) {
             console.log(`[PlutoRenderer] Setting up Clock for bond: ${bondName}`);
 
-            // Listen for input events from the clock
+            // Listen for input events from the clock (auto-removed when signal is aborted)
             clockEl.addEventListener('input', () => {
                 const value = clockEl.value ?? 1;
                 console.log(`[PlutoRenderer] Clock ${bondName} ticked: ${value}`);
@@ -927,7 +936,7 @@ function setupPlutoUIClock(container: HTMLElement, context: RendererContext<void
                         value: value
                     });
                 }
-            });
+            }, { signal });
         } else {
             console.log(`[PlutoRenderer] Found Clock without bond name`);
         }
@@ -967,7 +976,7 @@ function findBondNameFromParents(element: HTMLElement): string | null {
 /**
  * Setup handlers for "show more" buttons in tree views
  */
-function setupShowMoreButtons(container: HTMLElement, context: RendererContext<void>) {
+function setupShowMoreButtons(container: HTMLElement, context: RendererContext<void>, signal: AbortSignal) {
     const moreButtons = container.querySelectorAll('pluto-tree-more');
 
     moreButtons.forEach((button) => {
@@ -997,7 +1006,7 @@ function setupShowMoreButtons(container: HTMLElement, context: RendererContext<v
                         dim,
                     } as PlutoShowMoreMessage);
                 }
-            });
+            }, { signal });
         } else {
             // No objectid - show not supported message on click
             moreBtn.addEventListener('click', (e) => {
@@ -1005,7 +1014,7 @@ function setupShowMoreButtons(container: HTMLElement, context: RendererContext<v
                 moreBtn.textContent = '(expand not yet supported)';
                 moreBtn.style.cursor = 'default';
                 moreBtn.style.opacity = '0.4';
-            });
+            }, { signal });
         }
     });
 }
@@ -1014,13 +1023,13 @@ function setupShowMoreButtons(container: HTMLElement, context: RendererContext<v
  * Setup tree collapse/expand functionality
  * Allows users to click on tree prefixes to toggle collapsed state
  */
-function setupTreeCollapse(container: HTMLElement) {
+function setupTreeCollapse(container: HTMLElement, signal: AbortSignal) {
     const trees = container.querySelectorAll('pluto-tree');
 
     trees.forEach((tree) => {
         const treeEl = tree as HTMLElement;
 
-        // Add click handler to the tree element
+        // Add click handler to the tree element (auto-removed when signal is aborted)
         treeEl.addEventListener('click', (e) => {
             const target = e.target as HTMLElement;
 
@@ -1044,6 +1053,6 @@ function setupTreeCollapse(container: HTMLElement) {
                 clickedTree.classList.toggle('collapsed');
                 e.stopPropagation();
             }
-        });
+        }, { signal });
     });
 }

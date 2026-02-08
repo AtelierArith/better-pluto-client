@@ -11,6 +11,7 @@
 import * as vscode from 'vscode';
 import { PlutoNotebookSerializer, isCellFolded, toggleCellFolded, getCellId } from './PlutoNotebookSerializer';
 import { PlutoNotebookController } from './PlutoNotebookController';
+import { isValidRendererMessage, isSetBondMessage, isShowMoreMessage } from './renderer-messages';
 
 const NOTEBOOK_TYPE = 'pluto-notebook';
 
@@ -326,38 +327,38 @@ function setupRendererMessaging(context: vscode.ExtensionContext) {
     const messaging = vscode.notebooks.createRendererMessaging('pluto-html-renderer');
 
     const disposable = messaging.onDidReceiveMessage(e => {
-        const message = e.message as {
-            type: string;
-            name?: string;
-            value?: unknown;
-            objectid?: string;
-            cellId?: string;
-            dim?: number;
-        };
-        log(`Received renderer message: ${JSON.stringify(message)}`);
+        const raw = e.message;
 
-        if (message.type === 'setBond' && message.name !== undefined) {
-            // Find the notebook that contains this editor
+        if (!isValidRendererMessage(raw)) {
+            log(`Ignoring invalid renderer message (not an object with type): ${JSON.stringify(raw)}`);
+            return;
+        }
+
+        log(`Received renderer message: ${JSON.stringify(raw)}`);
+
+        if (isSetBondMessage(raw)) {
             const notebook = e.editor.notebook;
             if (notebook && controller) {
-                controller.setBond(notebook, message.name, message.value);
+                controller.setBond(notebook, raw.name, raw.value);
             } else {
                 log('No notebook or controller found');
             }
-        } else if (message.type === 'showMore' && message.objectid && message.cellId) {
-            // Handle "show more" request from tree view
+        } else if (isShowMoreMessage(raw)) {
             const notebook = e.editor.notebook;
+            const dim = typeof raw.dim === 'number' ? raw.dim : 1;
             if (notebook && controller) {
                 controller
-                    .reshowCell(notebook, message.cellId, message.objectid, message.dim ?? 1)
+                    .reshowCell(notebook, raw.cellId, raw.objectid, dim)
                     .catch((err) => {
                         log(`showMore failed: ${String(err)}`);
                     });
             } else {
                 log('No notebook or controller found for showMore');
             }
-        } else if (message.type === 'showMore') {
-            log('Ignoring showMore message without cellId/objectid');
+        } else if (raw.type === 'showMore') {
+            log(`Ignoring showMore message with missing fields: ${JSON.stringify(raw)}`);
+        } else {
+            log(`Ignoring unknown renderer message type: ${raw.type}`);
         }
     });
 

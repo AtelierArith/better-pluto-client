@@ -196,31 +196,50 @@ export class PlutoServer extends EventEmitter {
 
             let outputBuffer = '';
             let stderrBuffer = '';
-            let resolved = false;
+            let settled = false;
             let notebookIdFound = false;
             let httpReady = false;
+            let connecting = false;
+
+            const clearStartupTimers = (): void => {
+                if (this.startupTimeout) {
+                    this.scheduler.clearTimeout(this.startupTimeout);
+                    this.startupTimeout = null;
+                }
+                if (this.connectDelayTimeout) {
+                    this.scheduler.clearTimeout(this.connectDelayTimeout);
+                    this.connectDelayTimeout = null;
+                }
+            };
+
+            const settle = (fn: () => void): void => {
+                if (settled) { return; }
+                settled = true;
+                clearStartupTimers();
+                fn();
+            };
 
             const tryConnect = (): void => {
-                if (resolved || !notebookIdFound || !httpReady) {
+                if (connecting || settled || !notebookIdFound || !httpReady) {
                     return;
                 }
-                resolved = true;
+                connecting = true;
                 this.logger('[BetterPlutoServer] HTTP server and notebook ID are ready, connecting WebSocket...');
 
                 this.connectDelayTimeout = this.scheduler.setTimeout(async () => {
                     this.connectDelayTimeout = null;
                     try {
                         await this.connectWebSocket();
-                        if (this.startupTimeout) {
-                            this.scheduler.clearTimeout(this.startupTimeout);
-                            this.startupTimeout = null;
-                        }
-                        this.isReady = true;
-                        this.emit('ready');
-                        resolve();
+                        settle(() => {
+                            this.isReady = true;
+                            this.emit('ready');
+                            resolve();
+                        });
                     } catch (err) {
-                        this.killProcess();
-                        reject(err);
+                        settle(() => {
+                            this.killProcess();
+                            reject(err);
+                        });
                     }
                 }, 1000);
             };
@@ -244,17 +263,17 @@ export class PlutoServer extends EventEmitter {
                 const text = data.toString();
                 stderrBuffer += text;
 
-                if (!resolved && (stderrBuffer.includes('Go to http://localhost') || stderrBuffer.includes('Go to http://127.0.0.1'))) {
+                if (!connecting && !settled && (stderrBuffer.includes('Go to http://localhost') || stderrBuffer.includes('Go to http://127.0.0.1'))) {
                     httpReady = true;
                     tryConnect();
                 }
             });
 
             this.process.on('error', (err) => {
-                if (!resolved) {
+                settle(() => {
                     this.killProcess();
                     reject(err);
-                }
+                });
                 this.emit('error', err as Error);
             });
 
@@ -266,10 +285,10 @@ export class PlutoServer extends EventEmitter {
 
             this.startupTimeout = this.scheduler.setTimeout(() => {
                 this.startupTimeout = null;
-                if (!resolved) {
+                settle(() => {
                     this.killProcess();
                     reject(new Error('Pluto server startup timeout'));
-                }
+                });
             }, 120000);
         });
     }
@@ -333,15 +352,15 @@ export class PlutoServer extends EventEmitter {
         });
     }
 
-    private sendMessage(type: string, body: Record<string, unknown> = {}): void {
+    private sendMessage(type: string, body: Record<string, unknown> = {}): boolean {
         if (!this.transport) {
             this.logger(`[BetterPlutoServer] Cannot send '${type}': no transport`);
-            return;
+            return false;
         }
 
         if (this.transport.readyState() !== 1) {
             this.logger(`[BetterPlutoServer] Cannot send '${type}': WebSocket not open (readyState=${this.transport.readyState()})`);
-            return;
+            return false;
         }
 
         const message = {
@@ -355,8 +374,10 @@ export class PlutoServer extends EventEmitter {
         try {
             const encoded = encode(message);
             this.transport.send(Buffer.from(encoded));
+            return true;
         } catch (err) {
             this.logger(`[BetterPlutoServer] Failed to send '${type}': ${err}`);
+            return false;
         }
     }
 
@@ -426,7 +447,10 @@ export class PlutoServer extends EventEmitter {
     }
 
     async addCell(cellId: string, index: number, code: string = ''): Promise<void> {
-        this.sendMessage('update_notebook', {
+        const newOrder = [...this.cellOrder];
+        newOrder.splice(index, 0, cellId);
+
+        const sent = this.sendMessage('update_notebook', {
             updates: [
                 {
                     path: ['cell_inputs', cellId],
@@ -443,26 +467,21 @@ export class PlutoServer extends EventEmitter {
                 {
                     path: ['cell_order'],
                     op: 'replace',
-                    value: this.getCellOrderWithNewCell(cellId, index),
+                    value: newOrder,
                 },
             ],
         });
 
-        this.knownCellIds.add(cellId);
-    }
-
-    private getCellOrderWithNewCell(cellId: string, index: number): string[] {
-        const newOrder = [...this.cellOrder];
-        newOrder.splice(index, 0, cellId);
-        this.cellOrder = newOrder;
-        return newOrder;
+        if (sent) {
+            this.cellOrder = newOrder;
+            this.knownCellIds.add(cellId);
+        }
     }
 
     async deleteCell(cellId: string, _index: number): Promise<void> {
-        this.cellOrder = this.cellOrder.filter(id => id !== cellId);
-        this.knownCellIds.delete(cellId);
+        const newOrder = this.cellOrder.filter(id => id !== cellId);
 
-        this.sendMessage('update_notebook', {
+        const sent = this.sendMessage('update_notebook', {
             updates: [
                 {
                     path: ['cell_inputs', cellId],
@@ -471,17 +490,21 @@ export class PlutoServer extends EventEmitter {
                 {
                     path: ['cell_order'],
                     op: 'replace',
-                    value: this.cellOrder,
+                    value: newOrder,
                 },
             ],
         });
+
+        if (sent) {
+            this.cellOrder = newOrder;
+            this.knownCellIds.delete(cellId);
+        }
     }
 
     async deleteCellOnly(cellId: string): Promise<void> {
-        this.knownCellIds.delete(cellId);
-        this.cellOrder = this.cellOrder.filter(id => id !== cellId);
+        const newOrder = this.cellOrder.filter(id => id !== cellId);
 
-        this.sendMessage('update_notebook', {
+        const sent = this.sendMessage('update_notebook', {
             updates: [
                 {
                     path: ['cell_inputs', cellId],
@@ -489,6 +512,11 @@ export class PlutoServer extends EventEmitter {
                 },
             ],
         });
+
+        if (sent) {
+            this.knownCellIds.delete(cellId);
+            this.cellOrder = newOrder;
+        }
     }
 
     getPlutoCellId(vscodeCellId: string): string {
@@ -626,5 +654,6 @@ export class PlutoServer extends EventEmitter {
         }
         this.killProcess();
         this.isReady = false;
+        this.removeAllListeners();
     }
 }

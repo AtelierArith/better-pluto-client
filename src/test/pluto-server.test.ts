@@ -247,6 +247,276 @@ suite('PlutoServer WebSocket settled flag (#72)', () => {
     });
 });
 
+suite('PlutoServer connection timeout race (#74)', () => {
+    test('timeout during connect delay still rejects and cleans up', async () => {
+        const scheduler = new ControllableScheduler();
+        const processRunner = new TrackingProcessRunner();
+
+        const server = new PlutoServer({
+            scheduler,
+            processRunner,
+            transportFactory: new NoopTransportFactory(),
+            logger: () => {},
+            portFinder: async () => 9999,
+        });
+
+        const startPromise = server.start('/fake/notebook.jl');
+        await tick();
+
+        // Simulate stdout/stderr ready signals to trigger tryConnect
+        processRunner.stdoutDataHandler?.(Buffer.from('NOTEBOOK_ID=abc-123\n'));
+        processRunner.stderrDataHandler?.(Buffer.from('Go to http://127.0.0.1:9999\n'));
+
+        // At this point connectDelayTimeout (1000ms) is pending.
+        // Fire the startup timeout (120000ms) before the connect delay fires.
+        scheduler.fireByMs(120000);
+
+        await assert.rejects(startPromise, /timeout/i);
+        assert.strictEqual(processRunner.killed, true, 'Julia process should be killed');
+
+        // The connect delay timer should have been cleared by settle()
+        // Firing it now should be a no-op (timer was already cleared)
+        scheduler.fireByMs(1000);
+
+        server.stop();
+    });
+
+    test('process error during connect delay rejects once', async () => {
+        const scheduler = new ControllableScheduler();
+        const processRunner = new TrackingProcessRunner();
+
+        const server = new PlutoServer({
+            scheduler,
+            processRunner,
+            transportFactory: new NoopTransportFactory(),
+            logger: () => {},
+            portFinder: async () => 9999,
+        });
+
+        server.on('error', () => {});
+
+        const startPromise = server.start('/fake/notebook.jl');
+        await tick();
+
+        // Trigger tryConnect
+        processRunner.stdoutDataHandler?.(Buffer.from('NOTEBOOK_ID=abc-123\n'));
+        processRunner.stderrDataHandler?.(Buffer.from('Go to http://127.0.0.1:9999\n'));
+
+        // Process error while connectDelay is pending
+        processRunner.errorHandler?.(new Error('julia crashed'));
+
+        await assert.rejects(startPromise, /julia crashed/);
+        assert.strictEqual(processRunner.killed, true);
+
+        // Firing remaining timers should be no-ops
+        scheduler.fireAll();
+
+        server.stop();
+    });
+});
+
+suite('PlutoServer EventEmitter cleanup (#76)', () => {
+    test('stop() removes all listeners', () => {
+        const server = new PlutoServer({
+            scheduler: new NoopScheduler(),
+            processRunner: new NoopProcessRunner(),
+            transportFactory: new NoopTransportFactory(),
+            logger: () => {},
+        });
+
+        let called = false;
+        server.on('ready', () => { called = true; });
+        server.on('error', () => { called = true; });
+        server.on('closed', () => { called = true; });
+
+        assert.ok(server.listenerCount('ready') > 0, 'should have ready listener');
+        assert.ok(server.listenerCount('error') > 0, 'should have error listener');
+        assert.ok(server.listenerCount('closed') > 0, 'should have closed listener');
+
+        server.stop();
+
+        assert.strictEqual(server.listenerCount('ready'), 0, 'ready listeners should be removed');
+        assert.strictEqual(server.listenerCount('error'), 0, 'error listeners should be removed');
+        assert.strictEqual(server.listenerCount('closed'), 0, 'closed listeners should be removed');
+        assert.strictEqual(called, false, 'no listeners should have been invoked');
+    });
+
+    test('start/stop cycle does not accumulate listeners', async () => {
+        const scheduler = new ControllableScheduler();
+        const transport = new ControllableTransport();
+        const processRunner = new TrackingProcessRunner();
+
+        const server = new PlutoServer({
+            scheduler,
+            processRunner,
+            transportFactory: { async create() { return transport; } },
+            logger: () => {},
+            portFinder: async () => 9999,
+        });
+
+        // Simulate a full start cycle
+        const startPromise = server.start('/fake/notebook.jl');
+        await tick();
+        processRunner.stdoutDataHandler?.(Buffer.from('NOTEBOOK_ID=abc-123\n'));
+        processRunner.stderrDataHandler?.(Buffer.from('Go to http://127.0.0.1:9999\n'));
+        scheduler.fireByMs(1000);
+        await tick();
+        transport.triggerOpen();
+        scheduler.fireByMs(500);
+        await startPromise;
+
+        // Add external listener
+        server.on('cellState', () => {});
+        const listenersBeforeStop = server.listenerCount('cellState');
+        assert.strictEqual(listenersBeforeStop, 1);
+
+        // Stop should clear all listeners
+        server.stop();
+        assert.strictEqual(server.listenerCount('cellState'), 0, 'cellState listener should be removed after stop');
+    });
+});
+
+/**
+ * A transport that records sent messages (decoded from MessagePack).
+ */
+class RecordingTransport implements KernelTransport {
+    sentMessages: Record<string, unknown>[] = [];
+
+    onOpen(_handler: () => void): void {}
+    onMessage(_handler: (data: Buffer | ArrayBuffer) => void): void {}
+    onError(_handler: (error: Error) => void): void {}
+    onClose(_handler: () => void): void {}
+    send(data: Buffer): void {
+        const msgpack = require('@msgpack/msgpack');
+        this.sentMessages.push(msgpack.decode(new Uint8Array(data)) as Record<string, unknown>);
+    }
+    close(): void {}
+    readyState(): number { return 1; } // OPEN
+}
+
+/** Helper: create a PlutoServer with a RecordingTransport directly injected */
+function createServerWithTransport(transport: RecordingTransport): PlutoServer {
+    const server = new PlutoServer({
+        scheduler: new NoopScheduler(),
+        processRunner: new NoopProcessRunner(),
+        transportFactory: new NoopTransportFactory(),
+        logger: () => {},
+    });
+    // Inject transport directly so sendMessage works without calling start()
+    (server as any).transport = transport;
+    return server;
+}
+
+suite('PlutoServer state mutation after send (#75)', () => {
+    test('addCell sends message with pre-mutation cell order', async () => {
+        const transport = new RecordingTransport();
+        const server = createServerWithTransport(transport);
+
+        await server.updateCellOrder(['a', 'b']);
+        transport.sentMessages = [];
+
+        await server.addCell('c', 1, 'x = 1');
+
+        assert.strictEqual(transport.sentMessages.length, 1);
+        const msg = transport.sentMessages[0];
+        const body = msg.body as { updates: Array<{ path: string[]; value?: unknown }> };
+        const orderUpdate = body.updates.find(u => u.path[0] === 'cell_order');
+        assert.ok(orderUpdate, 'should have cell_order update');
+        assert.deepStrictEqual(orderUpdate!.value, ['a', 'c', 'b']);
+
+        assert.deepStrictEqual(server.getCellOrder(), ['a', 'c', 'b']);
+        assert.strictEqual(server.isKnownCell('c'), true);
+    });
+
+    test('deleteCell sends message with post-removal cell order', async () => {
+        const transport = new RecordingTransport();
+        const server = createServerWithTransport(transport);
+
+        await server.updateCellOrder(['a', 'b', 'c']);
+        transport.sentMessages = [];
+
+        await server.deleteCell('b', 1);
+
+        assert.strictEqual(transport.sentMessages.length, 1);
+        const msg = transport.sentMessages[0];
+        const body = msg.body as { updates: Array<{ path: string[]; value?: unknown }> };
+        const orderUpdate = body.updates.find(u => u.path[0] === 'cell_order');
+        assert.ok(orderUpdate, 'should have cell_order update');
+        assert.deepStrictEqual(orderUpdate!.value, ['a', 'c']);
+
+        assert.deepStrictEqual(server.getCellOrder(), ['a', 'c']);
+        assert.strictEqual(server.isKnownCell('b'), false);
+    });
+
+    test('addCell does not mutate state when send fails', async () => {
+        const transport = new RecordingTransport();
+        const server = createServerWithTransport(transport);
+
+        await server.updateCellOrder(['a', 'b']);
+
+        // Close the transport so sendMessage returns false
+        transport.readyState = () => 0;
+
+        await server.addCell('c', 1, 'x = 1');
+
+        // Send failed, so local state should be unchanged
+        assert.deepStrictEqual(server.getCellOrder(), ['a', 'b']);
+        assert.strictEqual(server.isKnownCell('c'), false);
+    });
+
+    test('deleteCell does not mutate state when send fails', async () => {
+        const transport = new RecordingTransport();
+        const server = createServerWithTransport(transport);
+
+        await server.updateCellOrder(['a', 'b', 'c']);
+        await server.addCell('b', 1); // Ensure b is in knownCellIds
+
+        // Close the transport
+        transport.readyState = () => 0;
+
+        await server.deleteCell('b', 1);
+
+        assert.ok(server.getCellOrder().includes('b'), 'b should still be in cell order');
+        assert.strictEqual(server.isKnownCell('b'), true);
+    });
+
+    test('deleteCellOnly does not mutate state when send fails', async () => {
+        const transport = new RecordingTransport();
+        const server = createServerWithTransport(transport);
+
+        await server.updateCellOrder(['a', 'b', 'c']);
+        await server.addCell('b', 1); // Ensure b is in knownCellIds
+
+        // Close the transport
+        transport.readyState = () => 0;
+
+        await server.deleteCellOnly('b');
+
+        assert.ok(server.getCellOrder().includes('b'), 'b should still be in cell order');
+        assert.strictEqual(server.isKnownCell('b'), true);
+    });
+
+    test('deleteCellOnly removes cell from local state after send', async () => {
+        const transport = new RecordingTransport();
+        const server = createServerWithTransport(transport);
+
+        await server.updateCellOrder(['a', 'b', 'c']);
+        transport.sentMessages = [];
+
+        await server.deleteCellOnly('b');
+
+        assert.strictEqual(transport.sentMessages.length, 1);
+        const msg = transport.sentMessages[0];
+        const body = msg.body as { updates: Array<{ path: string[]; op: string }> };
+        const removeUpdate = body.updates.find(u => u.op === 'remove');
+        assert.ok(removeUpdate, 'should have remove update');
+        assert.deepStrictEqual(removeUpdate!.path, ['cell_inputs', 'b']);
+
+        assert.deepStrictEqual(server.getCellOrder(), ['a', 'c']);
+        assert.strictEqual(server.isKnownCell('b'), false);
+    });
+});
+
 suite('PlutoServer public API behavior', () => {
     test('new server has empty order and unknown cell', () => {
         const server = new PlutoServer({
@@ -261,12 +531,8 @@ suite('PlutoServer public API behavior', () => {
     });
 
     test('addCell and deleteCell keep local known/order tracking', async () => {
-        const server = new PlutoServer({
-            scheduler: new NoopScheduler(),
-            processRunner: new NoopProcessRunner(),
-            transportFactory: new NoopTransportFactory(),
-            logger: () => {},
-        });
+        const transport = new RecordingTransport();
+        const server = createServerWithTransport(transport);
 
         await server.updateCellOrder(['a', 'b']);
         await server.addCell('c', 1, 'x = 1');

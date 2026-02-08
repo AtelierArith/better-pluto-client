@@ -308,6 +308,13 @@ class PlutoKernel {
                 await setCellId(cell, cellId);
             }
 
+            // Cancel any pending debounced direct update for this cell (#78)
+            const pendingTimeout = this.pendingDirectUpdates.get(cellId);
+            if (pendingTimeout) {
+                clearTimeout(pendingTimeout);
+                this.pendingDirectUpdates.delete(cellId);
+            }
+
             // End any existing execution
             const existingExecution = this.cellExecutions.get(cellId);
             if (existingExecution) {
@@ -358,6 +365,13 @@ class PlutoKernel {
         const code = cell.document.getText();
         log(`[BetterPlutoKernel] executeCell called for ${cellId}, code: "${code.slice(0, 50)}..."`);
         log(`[BetterPlutoKernel] executeCell length=${code.length}, language=${cell.document.languageId}`);
+
+        // Cancel any pending debounced direct update for this cell (#78)
+        const pendingTimeout = this.pendingDirectUpdates.get(cellId);
+        if (pendingTimeout) {
+            clearTimeout(pendingTimeout);
+            this.pendingDirectUpdates.delete(cellId);
+        }
 
         // End any existing execution for this cell (prevent duplicates)
         const existingExecution = this.cellExecutions.get(cellId);
@@ -459,6 +473,7 @@ class PlutoKernel {
 
     // Track cells that have been modified since last save
     private modifiedCellIds = new Set<string>();
+    private changeQueue: Promise<void> = Promise.resolve();  // Serializes handleNotebookChange (#77)
 
     // Track cells that are being folded/unfolded (changes should be ignored)
     private foldChangingCellIds = new Set<string>();
@@ -487,10 +502,17 @@ class PlutoKernel {
 
     /**
      * Handle notebook changes (cell added/removed/reordered/modified)
+     * Serialized through changeQueue to prevent concurrent interleaving (#77)
      */
     async handleNotebookChange(e: vscode.NotebookDocumentChangeEvent): Promise<void> {
         if (!this._isRunning) {return;}
+        this.changeQueue = this.changeQueue.then(() => this.processNotebookChange(e)).catch(err => {
+            console.error('[BetterPlutoKernel] Error processing notebook change:', err);
+        });
+        await this.changeQueue;
+    }
 
+    private async processNotebookChange(e: vscode.NotebookDocumentChangeEvent): Promise<void> {
         const removedCellIds: string[] = [];
         const addedCells: { cellId: string; code: string; index: number }[] = [];
 
@@ -588,20 +610,22 @@ class PlutoKernel {
             return;
         }
 
-        console.log(`[BetterPlutoKernel] Executing ${this.modifiedCellIds.size} modified cells on save`);
+        // Snapshot and clear modified set atomically so new modifications
+        // arriving during the async executeCells() are not lost (#79)
+        const toExecute = new Set(this.modifiedCellIds);
+        this.modifiedCellIds.clear();
+
+        console.log(`[BetterPlutoKernel] Executing ${toExecute.size} modified cells on save`);
 
         // Find the cells to execute
         const cellsToExecute: vscode.NotebookCell[] = [];
         for (let i = 0; i < this.notebook.cellCount; i++) {
             const cell = this.notebook.cellAt(i);
             const cellId = getCellId(cell);
-            if (cellId && this.modifiedCellIds.has(cellId)) {
+            if (cellId && toExecute.has(cellId)) {
                 cellsToExecute.push(cell);
             }
         }
-
-        // Clear modified cells before execution
-        this.modifiedCellIds.clear();
 
         // Execute the cells
         if (cellsToExecute.length > 0) {
