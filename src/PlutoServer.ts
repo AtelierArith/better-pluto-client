@@ -134,6 +134,7 @@ export class PlutoServer extends EventEmitter {
 
     private vscodeToPlutoId = new Map<string, string>();
     private plutoToVscodeId = new Map<string, string>();
+    private waitTimers = new Set<NodeJS.Timeout>();
 
     private readonly scheduler: Scheduler;
     private readonly processRunner: ProcessRunner;
@@ -228,7 +229,7 @@ export class PlutoServer extends EventEmitter {
                 outputBuffer += text;
 
                 if (!notebookIdFound) {
-                    const match = outputBuffer.match(/NOTEBOOK_ID=([a-f0-9-]+)/);
+                    const match = outputBuffer.match(/NOTEBOOK_ID=([a-fA-F0-9-]+)/);
                     if (match) {
                         this.notebookId = match[1];
                         notebookIdFound = true;
@@ -242,7 +243,7 @@ export class PlutoServer extends EventEmitter {
                 const text = data.toString();
                 stderrBuffer += text;
 
-                if (!resolved && stderrBuffer.includes('Go to http://localhost')) {
+                if (!resolved && (stderrBuffer.includes('Go to http://localhost') || stderrBuffer.includes('Go to http://127.0.0.1'))) {
                     httpReady = true;
                     tryConnect();
                 }
@@ -321,10 +322,12 @@ export class PlutoServer extends EventEmitter {
 
     private sendMessage(type: string, body: Record<string, unknown> = {}): void {
         if (!this.transport) {
+            this.logger(`[BetterPlutoServer] Cannot send '${type}': no transport`);
             return;
         }
 
         if (this.transport.readyState() !== 1) {
+            this.logger(`[BetterPlutoServer] Cannot send '${type}': WebSocket not open (readyState=${this.transport.readyState()})`);
             return;
         }
 
@@ -336,8 +339,12 @@ export class PlutoServer extends EventEmitter {
             notebook_id: this.notebookId,
         };
 
-        const encoded = encode(message);
-        this.transport.send(Buffer.from(encoded));
+        try {
+            const encoded = encode(message);
+            this.transport.send(Buffer.from(encoded));
+        } catch (err) {
+            this.logger(`[BetterPlutoServer] Failed to send '${type}': ${err}`);
+        }
     }
 
     private handleMessage(data: Buffer | ArrayBuffer): void {
@@ -459,6 +466,7 @@ export class PlutoServer extends EventEmitter {
 
     async deleteCellOnly(cellId: string): Promise<void> {
         this.knownCellIds.delete(cellId);
+        this.cellOrder = this.cellOrder.filter(id => id !== cellId);
 
         this.sendMessage('update_notebook', {
             updates: [
@@ -490,10 +498,16 @@ export class PlutoServer extends EventEmitter {
                 return;
             }
 
+            const cleanup = () => {
+                this.scheduler.clearInterval(checkInterval);
+                this.scheduler.clearTimeout(timeout);
+                this.waitTimers.delete(checkInterval);
+                this.waitTimers.delete(timeout);
+            };
+
             const checkInterval = this.scheduler.setInterval(async () => {
                 if (this.knownCellIds.has(cellId)) {
-                    this.scheduler.clearInterval(checkInterval);
-                    this.scheduler.clearTimeout(timeout);
+                    cleanup();
                     this.pendingCellIds.delete(cellId);
 
                     try {
@@ -512,10 +526,13 @@ export class PlutoServer extends EventEmitter {
             }, 100);
 
             const timeout = this.scheduler.setTimeout(() => {
-                this.scheduler.clearInterval(checkInterval);
+                cleanup();
                 this.pendingCellIds.delete(cellId);
                 resolve(cellId);
             }, 10000);
+
+            this.waitTimers.add(checkInterval);
+            this.waitTimers.add(timeout);
         });
     }
 
@@ -569,6 +586,12 @@ export class PlutoServer extends EventEmitter {
             this.scheduler.clearTimeout(this.resetSharedStateTimeout);
             this.resetSharedStateTimeout = null;
         }
+        // Clear waitForCellToAppear timers
+        for (const timer of this.waitTimers) {
+            this.scheduler.clearTimeout(timer);
+            this.scheduler.clearInterval(timer);
+        }
+        this.waitTimers.clear();
         this.cellOutputs.clear();
         this.knownCellIds.clear();
         this.cellOrder = [];
