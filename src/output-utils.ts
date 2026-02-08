@@ -269,7 +269,7 @@ export function renderStdoutAsHtml(stdout: string): string {
 </style>
 <div class="pluto-stdout-container">
     <div class="pluto-stdout-label">
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="currentColor">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="14" height="14" fill="currentColor">
             <path d="M448 96H64c-17.67 0-32 14.33-32 32v256c0 17.67 14.33 32 32 32h384c17.67 0 32-14.33 32-32V128c0-17.67-14.33-32-32-32zm8 288c0 4.41-3.59 8-8 8H64c-4.41 0-8-3.59-8-8V128c0-4.41 3.59-8 8-8h384c4.41 0 8 3.59 8 8v256z"/>
             <path d="M168 168l-88 88 88 88 22.63-22.63L125.25 256l65.38-65.37L168 168zM344 168l-22.63 22.63L386.75 256l-65.38 65.37L344 344l88-88-88-88z"/>
         </svg>
