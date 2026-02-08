@@ -132,9 +132,11 @@ function setupMathJax(): Promise<void> {
                 }
             });
 
-            // Load MathJax from CDN
+            // Load MathJax from CDN with SRI integrity check
             const script = document.createElement('script');
             script.src = 'https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-svg-full.js';
+            script.integrity = 'sha384-4kE/rQ11E8xT9QgrCBTyvenkuPfQo8rXYQvJZuMgxyPOoUfpatjQPlgdv6V5yhUK';
+            script.crossOrigin = 'anonymous';
             script.async = true;
             script.id = 'MathJax-script';
 
