@@ -19,6 +19,5 @@ export function accumulateExecutionState(
 
 export function shouldEndExecution(state: Partial<CellExecutionState>): boolean {
     return (state.running === false && state.queued !== true) ||
-           (state.runtime !== undefined && state.runtime >= 0) ||
            (state.errored === true);
 }
