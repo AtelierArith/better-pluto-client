@@ -219,6 +219,7 @@ export class PlutoServer extends EventEmitter {
                         this.emit('ready');
                         resolve();
                     } catch (err) {
+                        this.killProcess();
                         reject(err);
                     }
                 }, 1000);
@@ -251,6 +252,7 @@ export class PlutoServer extends EventEmitter {
 
             this.process.on('error', (err) => {
                 if (!resolved) {
+                    this.killProcess();
                     reject(err);
                 }
                 this.emit('error', err as Error);
@@ -265,6 +267,7 @@ export class PlutoServer extends EventEmitter {
             this.startupTimeout = this.scheduler.setTimeout(() => {
                 this.startupTimeout = null;
                 if (!resolved) {
+                    this.killProcess();
                     reject(new Error('Pluto server startup timeout'));
                 }
             }, 120000);
@@ -283,6 +286,8 @@ export class PlutoServer extends EventEmitter {
                 return;
             }
 
+            let settled = false;
+
             this.transport.onOpen(() => {
                 this.logger('[BetterPlutoServer] WebSocket connected');
 
@@ -295,7 +300,10 @@ export class PlutoServer extends EventEmitter {
                     this.sendMessage('reset_shared_state', {
                         notebook_id: this.notebookId,
                     });
-                    resolve();
+                    if (!settled) {
+                        settled = true;
+                        resolve();
+                    }
                 }, 500);
             });
 
@@ -304,7 +312,12 @@ export class PlutoServer extends EventEmitter {
             });
 
             this.transport.onError((err) => {
-                reject(new Error(`WebSocket connection failed: ${err.message}`));
+                if (!settled) {
+                    settled = true;
+                    reject(new Error(`WebSocket connection failed: ${err.message}`));
+                } else {
+                    this.logger(`[BetterPlutoServer] WebSocket error after connection settled: ${err.message}`);
+                }
             });
 
             this.transport.onClose(() => {
@@ -569,6 +582,13 @@ export class PlutoServer extends EventEmitter {
         });
     }
 
+    private killProcess(): void {
+        if (this.process) {
+            this.process.kill();
+            this.process = null;
+        }
+    }
+
     get ready(): boolean {
         return this.isReady;
     }
@@ -604,10 +624,7 @@ export class PlutoServer extends EventEmitter {
             this.transport.close();
             this.transport = null;
         }
-        if (this.process) {
-            this.process.kill();
-            this.process = null;
-        }
+        this.killProcess();
         this.isReady = false;
     }
 }
