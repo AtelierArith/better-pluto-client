@@ -1,6 +1,12 @@
 import * as assert from 'assert';
 import * as vscode from 'vscode';
-import { PlutoNotebookSerializer } from '../PlutoNotebookSerializer';
+import {
+    PlutoNotebookSerializer,
+    isPlutoNotebookMetadata,
+    isPlutoCellMetadata,
+    toNotebookMetadata,
+    toCellMetadata,
+} from '../PlutoNotebookSerializer';
 import { parse as parsePluto } from '../PlutoNotebookParser';
 
 suite('PlutoNotebookSerializer', () => {
@@ -154,5 +160,131 @@ suite('PlutoNotebookSerializer', () => {
         assert.ok(idxInternal !== -1);
         assert.ok(idxInternal > idxCell1);
         assert.ok(idxInternal > idxCell2);
+    });
+});
+
+suite('Metadata type validation (#80)', () => {
+    suite('isPlutoNotebookMetadata', () => {
+        test('accepts valid metadata', () => {
+            assert.strictEqual(isPlutoNotebookMetadata({ version: '0.20.0', preamble: '' }), true);
+            assert.strictEqual(isPlutoNotebookMetadata({ version: '0.20.0', preamble: '', internalCells: { a: 'b' } }), true);
+        });
+
+        test('rejects null/undefined/non-object', () => {
+            assert.strictEqual(isPlutoNotebookMetadata(null), false);
+            assert.strictEqual(isPlutoNotebookMetadata(undefined), false);
+            assert.strictEqual(isPlutoNotebookMetadata('string'), false);
+            assert.strictEqual(isPlutoNotebookMetadata(42), false);
+        });
+
+        test('rejects missing required fields', () => {
+            assert.strictEqual(isPlutoNotebookMetadata({ preamble: '' }), false);
+            assert.strictEqual(isPlutoNotebookMetadata({ version: '0.20.0' }), false);
+            assert.strictEqual(isPlutoNotebookMetadata({}), false);
+        });
+
+        test('rejects wrong field types', () => {
+            assert.strictEqual(isPlutoNotebookMetadata({ version: 123, preamble: '' }), false);
+            assert.strictEqual(isPlutoNotebookMetadata({ version: '0.20.0', preamble: null }), false);
+            assert.strictEqual(isPlutoNotebookMetadata({ version: '0.20.0', preamble: '', internalCells: 'bad' }), false);
+        });
+    });
+
+    suite('isPlutoCellMetadata', () => {
+        test('accepts valid metadata', () => {
+            assert.strictEqual(isPlutoCellMetadata({ id: 'abc-123' }), true);
+            assert.strictEqual(isPlutoCellMetadata({ id: 'abc-123', folded: true }), true);
+            assert.strictEqual(isPlutoCellMetadata({ id: 'abc-123', folded: false }), true);
+        });
+
+        test('rejects null/undefined/non-object', () => {
+            assert.strictEqual(isPlutoCellMetadata(null), false);
+            assert.strictEqual(isPlutoCellMetadata(undefined), false);
+            assert.strictEqual(isPlutoCellMetadata('string'), false);
+        });
+
+        test('rejects missing id', () => {
+            assert.strictEqual(isPlutoCellMetadata({}), false);
+            assert.strictEqual(isPlutoCellMetadata({ folded: true }), false);
+        });
+
+        test('rejects wrong field types', () => {
+            assert.strictEqual(isPlutoCellMetadata({ id: 123 }), false);
+            assert.strictEqual(isPlutoCellMetadata({ id: 'abc', folded: 'yes' }), false);
+        });
+    });
+
+    suite('toNotebookMetadata', () => {
+        test('passes through valid metadata', () => {
+            const valid = { version: '0.20.0', preamble: '# comment' };
+            const result = toNotebookMetadata(valid);
+            assert.strictEqual(result.version, '0.20.0');
+            assert.strictEqual(result.preamble, '# comment');
+        });
+
+        test('returns defaults for null/undefined', () => {
+            const result = toNotebookMetadata(null);
+            assert.strictEqual(result.version, '0.20.0');
+            assert.strictEqual(result.preamble, '');
+        });
+
+        test('extracts valid fields from partial object', () => {
+            const partial = { version: '0.19.0', preamble: 42, extra: true };
+            const result = toNotebookMetadata(partial);
+            assert.strictEqual(result.version, '0.19.0');
+            assert.strictEqual(result.preamble, '');  // invalid type → default
+        });
+    });
+
+    suite('toCellMetadata', () => {
+        test('passes through valid metadata', () => {
+            const valid = { id: 'cell-1', folded: true };
+            const result = toCellMetadata(valid);
+            assert.strictEqual(result.id, 'cell-1');
+            assert.strictEqual(result.folded, true);
+        });
+
+        test('returns defaults for null/undefined', () => {
+            const result = toCellMetadata(undefined);
+            assert.strictEqual(result.id, '');
+            assert.strictEqual(result.folded, false);
+        });
+
+        test('extracts valid fields from partial object', () => {
+            const partial = { id: 123, folded: true };
+            const result = toCellMetadata(partial);
+            assert.strictEqual(result.id, '');  // invalid type → default
+            assert.strictEqual(result.folded, true);
+        });
+    });
+
+    test('serialize handles invalid notebook metadata gracefully', () => {
+        const serializer = new PlutoNotebookSerializer();
+        const cell = new vscode.NotebookCellData(vscode.NotebookCellKind.Code, 'x = 1', 'julia');
+        cell.metadata = { custom: { id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', folded: false } };
+
+        const notebookData = new vscode.NotebookData([cell]);
+        // Invalid metadata (missing version/preamble)
+        notebookData.metadata = { custom: { bad: 'data' } };
+
+        // Should not throw — falls back to defaults
+        const bytes = serializer.serializeNotebook(notebookData, new vscode.CancellationTokenSource().token);
+        const text = new TextDecoder().decode(bytes);
+        assert.ok(text.includes('v0.20.0'), 'should use default version');
+    });
+
+    test('serialize handles invalid cell metadata gracefully', () => {
+        const serializer = new PlutoNotebookSerializer();
+        const cell = new vscode.NotebookCellData(vscode.NotebookCellKind.Code, 'x = 1', 'julia');
+        // Invalid cell metadata (no id)
+        cell.metadata = { custom: { notAnId: 42 } };
+
+        const notebookData = new vscode.NotebookData([cell]);
+        notebookData.metadata = { custom: { version: '0.20.0', preamble: '' } };
+
+        // Should not throw — generates a cell ID
+        const bytes = serializer.serializeNotebook(notebookData, new vscode.CancellationTokenSource().token);
+        const text = new TextDecoder().decode(bytes);
+        assert.ok(text.includes('# ╔═╡'), 'should have cell marker with generated ID');
     });
 });

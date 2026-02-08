@@ -21,6 +21,60 @@ interface PlutoCellMetadata {
     folded?: boolean;  // Code is hidden (folded) in Pluto.jl
 }
 
+const defaultNotebookMetadata: PlutoNotebookMetadata = {
+    version: '0.20.0',
+    preamble: '',
+};
+
+const defaultCellMetadata: PlutoCellMetadata = {
+    id: '',
+    folded: false,
+};
+
+export function isPlutoNotebookMetadata(value: unknown): value is PlutoNotebookMetadata {
+    if (typeof value !== 'object' || value === null) { return false; }
+    const obj = value as Record<string, unknown>;
+    if (typeof obj.version !== 'string') { return false; }
+    if (typeof obj.preamble !== 'string') { return false; }
+    if (obj.internalCells !== undefined && (typeof obj.internalCells !== 'object' || obj.internalCells === null)) { return false; }
+    return true;
+}
+
+export function isPlutoCellMetadata(value: unknown): value is PlutoCellMetadata {
+    if (typeof value !== 'object' || value === null) { return false; }
+    const obj = value as Record<string, unknown>;
+    if (typeof obj.id !== 'string') { return false; }
+    if (obj.folded !== undefined && typeof obj.folded !== 'boolean') { return false; }
+    return true;
+}
+
+export function toNotebookMetadata(value: unknown): PlutoNotebookMetadata {
+    if (isPlutoNotebookMetadata(value)) { return value; }
+    if (typeof value === 'object' && value !== null) {
+        const obj = value as Record<string, unknown>;
+        return {
+            version: typeof obj.version === 'string' ? obj.version : defaultNotebookMetadata.version,
+            preamble: typeof obj.preamble === 'string' ? obj.preamble : defaultNotebookMetadata.preamble,
+            internalCells: typeof obj.internalCells === 'object' && obj.internalCells !== null
+                ? obj.internalCells as Record<string, string>
+                : undefined,
+        };
+    }
+    return { ...defaultNotebookMetadata };
+}
+
+export function toCellMetadata(value: unknown): PlutoCellMetadata {
+    if (isPlutoCellMetadata(value)) { return value; }
+    if (typeof value === 'object' && value !== null) {
+        const obj = value as Record<string, unknown>;
+        return {
+            id: typeof obj.id === 'string' ? obj.id : defaultCellMetadata.id,
+            folded: typeof obj.folded === 'boolean' ? obj.folded : defaultCellMetadata.folded,
+        };
+    }
+    return { ...defaultCellMetadata };
+}
+
 /**
  * NotebookSerializer implementation for Pluto.jl notebooks
  */
@@ -160,14 +214,14 @@ export class PlutoNotebookSerializer implements vscode.NotebookSerializer {
      * Convert VS Code NotebookData back to Pluto notebook format
      */
     private convertFromNotebookData(data: vscode.NotebookData): parser.PlutoNotebook {
-        const metadata = (data.metadata?.custom || {}) as PlutoNotebookMetadata;
+        const metadata = toNotebookMetadata(data.metadata?.custom);
 
         const cells = new Map<string, parser.PlutoCell>();
         const cellOrder: string[] = [];
         const foldedCells = new Set<string>();
 
         for (const cellData of data.cells) {
-            const cellMetadata = (cellData.metadata?.custom || {}) as PlutoCellMetadata;
+            const cellMetadata = toCellMetadata(cellData.metadata?.custom);
 
             // Get or generate cell ID
             let cellId = cellMetadata.id;
@@ -268,8 +322,8 @@ export class PlutoNotebookSerializer implements vscode.NotebookSerializer {
  * Get cell ID from cell metadata
  */
 export function getCellId(cell: vscode.NotebookCell): string {
-    const metadata = cell.metadata?.custom as PlutoCellMetadata | undefined;
-    return metadata?.id || '';
+    const metadata = toCellMetadata(cell.metadata?.custom);
+    return metadata.id || '';
 }
 
 /**
@@ -300,8 +354,8 @@ export function isCellFolded(cell: vscode.NotebookCell): boolean {
     if (cell.metadata?.inputCollapsed !== undefined) {
         return cell.metadata.inputCollapsed;
     }
-    const metadata = cell.metadata?.custom as PlutoCellMetadata | undefined;
-    return metadata?.folded ?? false;
+    const metadata = toCellMetadata(cell.metadata?.custom);
+    return metadata.folded ?? false;
 }
 
 /**
