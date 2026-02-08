@@ -190,8 +190,10 @@ export function serialize(notebook: PlutoNotebook): string {
         lines.push('');
     }
 
-    // Cells
-    for (const [id, cell] of notebook.cells) {
+    // Cells - iterate in cellOrder to preserve intended order
+    for (const id of notebook.cellOrder) {
+        const cell = notebook.cells.get(id);
+        if (!cell) { continue; }
         lines.push(`# ╔═╡ ${id}`);
         // Code is stored as-is (md"""...""" cells already have the wrapper)
         // Remove leading newline if it was added for folding display
