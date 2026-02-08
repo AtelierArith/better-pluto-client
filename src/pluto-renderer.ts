@@ -6,6 +6,7 @@
 
 import type { RendererContext, OutputItem } from 'vscode-notebook-renderer';
 import { isTableOfContentsLike } from './pluto-toc-utils';
+import { sanitizeHtml, isScriptSrcAllowed, isInlineScriptAllowed } from './pluto-sanitizer';
 
 interface PlutoBondMessage {
     type: 'setBond';
@@ -219,8 +220,8 @@ export function activate(context: RendererContext<void>) {
             const container = document.createElement('div');
             container.className = 'pluto-output';
 
-            // Parse and render the HTML
-            container.innerHTML = html;
+            // Sanitize and render the HTML
+            container.innerHTML = sanitizeHtml(html);
 
             // Find and setup interactive elements
             setupInteractiveElements(container, context);
@@ -697,15 +698,20 @@ async function executeScripts(container: HTMLElement): Promise<void> {
     console.log(`[PlutoRenderer] Found ${scripts.length} scripts to execute`);
 
     for (const oldScript of Array.from(scripts)) {
-        const newScript = document.createElement('script');
-
-        // Copy attributes
-        for (const attr of Array.from(oldScript.attributes)) {
-            newScript.setAttribute(attr.name, attr.value);
-        }
-
         if (oldScript.src) {
-            // External script - load it
+            // External script - validate source against allowlist
+            if (!isScriptSrcAllowed(oldScript.src)) {
+                console.warn(`[PlutoRenderer] Blocked external script from disallowed source: ${oldScript.src}`);
+                oldScript.remove();
+                continue;
+            }
+
+            const newScript = document.createElement('script');
+            // Copy attributes
+            for (const attr of Array.from(oldScript.attributes)) {
+                newScript.setAttribute(attr.name, attr.value);
+            }
+
             console.log(`[PlutoRenderer] Loading external script: ${oldScript.src}`);
             await new Promise<void>((resolve) => {
                 newScript.onload = () => {
@@ -719,17 +725,31 @@ async function executeScripts(container: HTMLElement): Promise<void> {
                 oldScript.parentNode?.replaceChild(newScript, oldScript);
             });
         } else {
-            // Inline script - wrap with currentScript polyfill for PlutoUI widgets
+            // Inline script - validate content
+            const content = oldScript.textContent || '';
+            if (!isInlineScriptAllowed(content)) {
+                console.warn(`[PlutoRenderer] Blocked inline script that failed safety check`);
+                oldScript.remove();
+                continue;
+            }
+
+            const newScript = document.createElement('script');
+            // Copy attributes
+            for (const attr of Array.from(oldScript.attributes)) {
+                newScript.setAttribute(attr.name, attr.value);
+            }
+
+            // Wrap with currentScript polyfill for PlutoUI widgets
             // PlutoUI's Clock.js uses `currentScript ?? this.currentScript` to find its element
             const wrappedScript = `
                 (function() {
                     var currentScript = document.currentScript;
-                    ${oldScript.textContent}
+                    ${content}
                 })();
             `;
             newScript.textContent = wrappedScript;
             oldScript.parentNode?.replaceChild(newScript, oldScript);
-            console.log(`[PlutoRenderer] Executed inline script (${oldScript.textContent?.length || 0} chars)`);
+            console.log(`[PlutoRenderer] Executed inline script (${content.length} chars)`);
         }
     }
 }
