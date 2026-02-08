@@ -48,6 +48,8 @@ const ALLOWED_TAGS = new Set([
     'semantics', 'annotation', 'annotation-xml',
     // Pluto custom elements
     'bond', 'pluto-tree', 'pluto-tree-prefix', 'pluto-tree-more',
+    'pluto-tree-items', 'pluto-tree-pair',
+    'p-r', 'p-k', 'p-v',
     'plutoui-clock',
     // Style (scoped per Pluto output)
     'style',
@@ -222,6 +224,14 @@ function isAttributeAllowed(tagName: string, attrName: string, attrValue: string
 export function sanitizeHtml(html: string): string {
     const parser = new DOMParser();
     const doc = parser.parseFromString(html, 'text/html');
+
+    // DOMParser moves <style> elements that appear before body content
+    // into <head> per the HTML parsing spec. Move them back into <body>
+    // so they are included in the sanitized output.
+    const headStyles = doc.head.querySelectorAll('style');
+    for (const style of Array.from(headStyles)) {
+        doc.body.insertBefore(style, doc.body.firstChild);
+    }
 
     sanitizeNode(doc.body);
 
