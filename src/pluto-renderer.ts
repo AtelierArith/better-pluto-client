@@ -143,6 +143,8 @@ function setupMathJax(): Promise<void> {
 
             script.onerror = (e) => {
                 console.error('[PlutoRenderer] Failed to load MathJax:', e);
+                script.remove(); // Remove failed script so retry can re-add it
+                mathJaxLoadPromise = null; // Allow retry on next call
                 resolve(); // Resolve anyway to not block rendering
             };
 
@@ -200,6 +202,13 @@ export function activate(context: RendererContext<void>) {
         async renderOutputItem(outputItem: OutputItem, element: HTMLElement) {
             const html = outputItem.text();
 
+            // Disconnect previous IntersectionObservers to prevent leaks
+            const prevObservers = (element as any).__tocObservers as IntersectionObserver[] | undefined;
+            if (prevObservers) {
+                prevObservers.forEach(obs => obs.disconnect());
+                delete (element as any).__tocObservers;
+            }
+
             // Debug log
             console.log('[PlutoRenderer] Rendering HTML output:', html.slice(0, 500));
 
@@ -237,6 +246,10 @@ export function activate(context: RendererContext<void>) {
                 const tocEl = renderTableOfContentsFromDocument(container, element);
                 if (tocEl) {
                     container.appendChild(tocEl);
+                    // Propagate observers to element for cleanup on next render
+                    if ((tocEl as any).__tocObservers) {
+                        (element as any).__tocObservers = (tocEl as any).__tocObservers;
+                    }
                 } else {
                     const placeholder = document.createElement('div');
                     placeholder.className = 'pluto-toc-placeholder';
@@ -646,6 +659,9 @@ function renderTableOfContentsFromDocument(_container: HTMLElement, outputElemen
         observer2.observe(element);
     });
 
+    // Store observers on wrapper for cleanup on re-render
+    (wrapper as any).__tocObservers = [observer1, observer2];
+
     return wrapper;
 }
 
@@ -769,10 +785,9 @@ function setupInteractiveElements(container: HTMLElement, context: RendererConte
  * Find the bond name from an input element
  */
 function findBondName(input: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement): string | null {
-    // Check various attributes that Pluto might use
+    // Check Pluto-specific attributes only (not generic HTML 'name')
     const bondAttr = input.getAttribute('bond') ||
                      input.getAttribute('data-bond') ||
-                     input.getAttribute('name') ||
                      input.closest('bond')?.getAttribute('def') ||
                      null;
 

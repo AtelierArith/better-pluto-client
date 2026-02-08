@@ -20,8 +20,15 @@ suite('cell-state-machine', () => {
         assert.strictEqual(shouldEndExecution({ running: false, queued: false }), true);
     });
 
-    test('shouldEndExecution returns true on runtime', () => {
-        assert.strictEqual(shouldEndExecution({ runtime: 0 }), true);
+    test('shouldEndExecution does not end on runtime alone', () => {
+        // runtime alone should not cause completion (prevents premature termination
+        // when accumulated state carries a previous runtime value)
+        assert.strictEqual(shouldEndExecution({ runtime: 0 }), false);
+        assert.strictEqual(shouldEndExecution({ runtime: 1.5 }), false);
+    });
+
+    test('shouldEndExecution returns true on running=false with runtime', () => {
+        assert.strictEqual(shouldEndExecution({ running: false, queued: false, runtime: 1.5 }), true);
     });
 
     test('shouldEndExecution returns true on errored', () => {

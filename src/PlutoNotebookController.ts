@@ -20,6 +20,7 @@ const NOTEBOOK_TYPE = 'pluto-notebook';
 class PlutoKernel {
     private server: PlutoServer;
     private _isRunning = false;
+    private startPromise: Promise<void> | null = null;
     private cellExecutions = new Map<string, vscode.NotebookCellExecution>();
     private cellOutputs = new Map<string, { body?: string; mime?: string; logs?: LogEntry[]; lastCode?: string }>();
     private pendingDirectUpdates = new Map<string, NodeJS.Timeout>();  // Debounced direct updates
@@ -56,24 +57,31 @@ class PlutoKernel {
      */
     async start(): Promise<void> {
         if (this._isRunning) {return;}
+        // Prevent concurrent start() calls from spawning duplicate Julia processes
+        if (this.startPromise) {return this.startPromise;}
 
         log(`[BetterPlutoKernel] Starting kernel for ${this.notebook.uri.fsPath}`);
 
-        try {
-            await this.server.start(this.notebook.uri.fsPath);
-            this._isRunning = true;
-            this.onStateChange();
+        this.startPromise = (async () => {
+            try {
+                await this.server.start(this.notebook.uri.fsPath);
+                this._isRunning = true;
+                this.onStateChange();
 
-            // Sync cells with Pluto
-            await this.syncCellsWithPluto();
+                // Sync cells with Pluto
+                await this.syncCellsWithPluto();
 
-            // Run all cells after sync to ensure they are executed
-            await this.runAllCellsOnStart();
+                // Run all cells after sync to ensure they are executed
+                await this.runAllCellsOnStart();
 
-        } catch (err) {
-            console.error('[BetterPlutoKernel] Failed to start:', err);
-            throw err;
-        }
+            } catch (err) {
+                console.error('[BetterPlutoKernel] Failed to start:', err);
+                throw err;
+            } finally {
+                this.startPromise = null;
+            }
+        })();
+        return this.startPromise;
     }
 
     /**
@@ -178,6 +186,8 @@ class PlutoKernel {
         // Clear known cells - they'll be re-discovered when kernel restarts
         this.knownCellIds.clear();
         this.cellOutputs.clear();
+        this.modifiedCellIds.clear();
+        this.lastStateUpdateAt.clear();
 
         this.onStateChange();
     }
@@ -439,7 +449,11 @@ class PlutoKernel {
                 ])
             ]);
             execution.end(false, Date.now());
-            this.cellExecutions.delete(cellId);
+            // Use plutoId if the execution was remapped, otherwise use cellId
+            const activeId = (plutoId !== cellId) ? plutoId : cellId;
+            this.cellExecutions.delete(activeId);
+            this.cellExecStates.delete(activeId);
+            this.cellOutputs.delete(activeId);
         }
     }
 
@@ -925,9 +939,10 @@ class PlutoKernel {
             if (id === cellId) {
                 console.log(`[BetterPlutoKernel] Direct update for ${cellId} at index ${i} with ${outputs.length} outputs`);
 
+                let execution: vscode.NotebookCellExecution | undefined;
                 try {
                     // Create a temporary execution to update the output
-                    const execution = this.controller.createNotebookCellExecution(cell);
+                    execution = this.controller.createNotebookCellExecution(cell);
                     execution.start(Date.now());
                     await execution.replaceOutput(outputs);
                     execution.end(true, Date.now());
@@ -935,6 +950,7 @@ class PlutoKernel {
                     console.log(`[BetterPlutoKernel] Updated cell ${cellId} successfully`);
                 } catch (err) {
                     console.error(`[BetterPlutoKernel] Failed to update cell ${cellId}:`, err);
+                    try { execution?.end(false, Date.now()); } catch {}
                 }
                 break;
             }
@@ -1152,24 +1168,7 @@ pluto-tree.collapsed pluto-tree-more::before {
     content: "⋯";
 }
 </style>
-<script>
-document.addEventListener('click', function(e) {
-    // Handle tree collapse/expand (skip if clicking "show more" - handled by renderer)
-    const moreButton = e.target.closest('pluto-tree-more');
-    if (moreButton) {
-        // Let the renderer handle this via postMessage
-        return;
-    }
-
-    const tree = e.target.closest('pluto-tree');
-    const prefix = e.target.closest('pluto-tree-prefix');
-    if (tree && (prefix || e.target === tree)) {
-        const parent = tree.parentElement?.closest('pluto-tree');
-        if (parent && parent.classList.contains('collapsed')) return;
-        tree.classList.toggle('collapsed');
-    }
-});
-</script>
+<!-- Tree collapse/expand is handled by setupTreeCollapse in the renderer -->
 ${treeHtml}`;
         } catch (e) {
             log(`[BetterPlutoKernel] Tree HTML render error: ${e}`);
@@ -1242,7 +1241,7 @@ ${treeHtml}`;
                     const moreHtml = renderMoreDirect(el);
                     if (moreHtml) {return moreHtml;}
                     if (!Array.isArray(el) || el.length !== 2) {return '';}
-                    const indexDisplay = `<p-k>${el[0]}</p-k>`;
+                    const indexDisplay = `<p-k>${escapeHtml(String(el[0]))}</p-k>`;
                     return `<p-r>${indexDisplay}<p-v>${renderMimepair(el[1])}</p-v></p-r>`;
                 }).join('');
                 const isMoreMarker = (e: unknown) => e === 'more' || (e && typeof e === 'object' && !Array.isArray(e) && (e as Record<string, unknown>).head === 'more');
@@ -1330,7 +1329,7 @@ ${treeHtml}`;
                         if (moreHtml) {return moreHtml;}
                         const el = r as unknown[];
                         if (!Array.isArray(el) || el.length !== 2) {return '';}
-                        const indexDisplay = plutoType === 'Set' ? '' : `<p-k>${el[0]}</p-k>`;
+                        const indexDisplay = plutoType === 'Set' ? '' : `<p-k>${escapeHtml(String(el[0]))}</p-k>`;
                         return `<p-r>${indexDisplay}<p-v>${mimepairOutput(el[1] as unknown[])}</p-v></p-r>`;
                     }).join('');
                     break;
@@ -1363,7 +1362,7 @@ ${treeHtml}`;
                         if (moreHtml) {return moreHtml;}
                         const el = r as unknown[];
                         if (!Array.isArray(el) || el.length !== 2) {return '';}
-                        return `<p-r><p-k>${el[0]}</p-k><p-v>${mimepairOutput(el[1] as unknown[])}</p-v></p-r>`;
+                        return `<p-r><p-k>${escapeHtml(String(el[0]))}</p-k><p-v>${mimepairOutput(el[1] as unknown[])}</p-v></p-r>`;
                     }).join('');
             }
 
