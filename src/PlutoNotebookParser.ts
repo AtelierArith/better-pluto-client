@@ -19,10 +19,11 @@ export interface PlutoNotebook {
     internalCells: Map<string, string>;  // cellId -> code content
 }
 
-const CELL_MARKER = /^# ╔═╡ ([0-9a-f-]+)$/;
+const UUID_PATTERN = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
+const CELL_MARKER = new RegExp(`^# ╔═╡ (${UUID_PATTERN})$`);
 const CELL_ORDER_START = /^# ╔═╡ Cell order:$/;
 // Cell order uses ╠═ for visible cells or ╟─ for hidden (folded) cells
-const CELL_ORDER_ITEM = /^# ([╠╟])[═─]([0-9a-f-]+)$/;
+const CELL_ORDER_ITEM = new RegExp(`^# ([╠╟])[═─](${UUID_PATTERN})$`);
 const VERSION_PATTERN = /^# v(\d+\.\d+\.\d+)$/;
 
 // Pluto.jl internal cell IDs for package management (should be filtered out)

@@ -132,8 +132,6 @@ export class PlutoServer extends EventEmitter {
     private connectDelayTimeout: NodeJS.Timeout | null = null;
     private resetSharedStateTimeout: NodeJS.Timeout | null = null;
 
-    private vscodeToPlutoId = new Map<string, string>();
-    private plutoToVscodeId = new Map<string, string>();
     private waitTimers = new Set<NodeJS.Timeout>();
 
     private readonly scheduler: Scheduler;
@@ -408,6 +406,7 @@ export class PlutoServer extends EventEmitter {
                 }
             }
         } catch (err) {
+            this.logger(`[BetterPlutoServer] Failed to process message: ${err}`);
             this.emit('error', err as Error);
         }
     }
@@ -520,11 +519,11 @@ export class PlutoServer extends EventEmitter {
     }
 
     getPlutoCellId(vscodeCellId: string): string {
-        return this.vscodeToPlutoId.get(vscodeCellId) || vscodeCellId;
+        return vscodeCellId;
     }
 
     getVscodeCellId(plutoId: string): string {
-        return this.plutoToVscodeId.get(plutoId) || plutoId;
+        return plutoId;
     }
 
     async waitForCellToAppear(cellId: string, code: string = ''): Promise<string> {
@@ -582,17 +581,21 @@ export class PlutoServer extends EventEmitter {
     }
 
     async updateCellOrder(newOrder: string[]): Promise<void> {
-        this.cellOrder = [...newOrder];
+        const orderCopy = [...newOrder];
 
-        this.sendMessage('update_notebook', {
+        const sent = this.sendMessage('update_notebook', {
             updates: [
                 {
                     path: ['cell_order'],
                     op: 'replace',
-                    value: this.cellOrder,
+                    value: orderCopy,
                 },
             ],
         });
+
+        if (sent) {
+            this.cellOrder = orderCopy;
+        }
     }
 
     async updateCell(cellId: string, code: string): Promise<void> {
@@ -644,8 +647,6 @@ export class PlutoServer extends EventEmitter {
         this.knownCellIds.clear();
         this.cellOrder = [];
         this.pendingCellIds.clear();
-        this.vscodeToPlutoId.clear();
-        this.plutoToVscodeId.clear();
         this.notebookId = '';
 
         if (this.transport) {
