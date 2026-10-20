@@ -438,6 +438,9 @@ function handleCellResult(
     if (result.running !== undefined) {
         cellState.running = result.running as boolean;
     }
+    if (result.queued !== undefined) {
+        cellState.queued = result.queued as boolean;
+    }
     if (result.errored !== undefined) {
         cellState.errored = result.errored as boolean;
     }
@@ -485,7 +488,9 @@ function handleCellField(
         cellState.output = output;
         state.cellOutputs.set(cellId, output);
     } else if (field === 'logs') {
-        if (Array.isArray(value)) {
+        if (op === 'remove') {
+            cellState.logs = [];
+        } else if (Array.isArray(value)) {
             cellState.logs = extractLogs(value);
         } else if (value && typeof value === 'object') {
             const logEntry = extractSingleLog(value as Record<string, unknown>);

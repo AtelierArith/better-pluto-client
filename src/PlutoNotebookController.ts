@@ -17,7 +17,7 @@ const NOTEBOOK_TYPE = 'pluto-notebook';
 /**
  * Manages Pluto kernel for a notebook
  */
-class PlutoKernel {
+export class PlutoKernel {
     private server: PlutoServer;
     private _isRunning = false;
     private startPromise: Promise<void> | null = null;
@@ -787,13 +787,8 @@ class PlutoKernel {
             // For tree+object, don't overwrite existing data with just an objectid
             const isObjectIdOnly = state.output.mime === 'application/vnd.pluto.tree+object' &&
                                    isPlutoObjectId(state.output.body);
-            // Don't overwrite non-empty output with empty output
-            const isEmptyOverwrite = !state.output.body && existingOutput.body;
-            
             if (isObjectIdOnly && existingOutput.body && existingOutput.mime === 'application/vnd.pluto.tree+object') {
                 log(`[BetterPlutoKernel] Cell ${cellId} skipping objectid-only update, keeping existing tree data`);
-            } else if (isEmptyOverwrite) {
-                log(`[BetterPlutoKernel] Cell ${cellId} skipping empty output update, keeping existing: ${existingOutput.body?.slice(0, 50)}`);
             } else {
                 existingOutput.body = state.output.body;
                 existingOutput.mime = state.output.mime;
@@ -801,11 +796,9 @@ class PlutoKernel {
             }
         }
 
-        if (state.logs) {
-            // Avoid wiping existing logs with empty arrays (full state often omits stdout)
-            if (state.logs.length > 0 || !existingOutput.logs || existingOutput.logs.length === 0) {
-                existingOutput.logs = state.logs;
-            }
+        if (state.logs !== undefined) {
+            // An explicit empty list clears stdout; an omitted field preserves it.
+            existingOutput.logs = state.logs;
             console.log(`[BetterPlutoKernel] Cell ${cellId} logs:`, state.logs);
         }
 
@@ -819,9 +812,8 @@ class PlutoKernel {
         // Update execution output if we have an execution
         if (execution) {
             log(`[BetterPlutoKernel] Updating execution for ${cellId} with ${outputs.length} outputs`);
-            if (outputs.length > 0) {
-                execution.replaceOutput(outputs);
-            }
+            // Empty output is meaningful: Pluto may have removed the previous result.
+            execution.replaceOutput(outputs);
 
             // End execution if cell is done (using accumulated state for robustness)
             // For unchanged cells, Pluto may skip running/runtime diffs entirely;
@@ -878,7 +870,7 @@ class PlutoKernel {
             clearTimeout(existing);
         }
 
-        const timeout = setTimeout(async () => {
+        const timeout = setTimeout(() => {
             this.pendingStateSync.delete(cellId);
             const execution = this.cellExecutions.get(cellId);
             if (!execution) {
@@ -890,34 +882,9 @@ class PlutoKernel {
             try {
                 this.server.requestFullState();
 
-                // Wait a bit for full state to arrive
-                await new Promise(resolve => setTimeout(resolve, 300));
-
-                // If execution is still pending, end it now
-                // This is a safety net - normally last_run_timestamp + accumulated state
-                // should resolve the execution before this fires
-                const stillPending = this.cellExecutions.get(cellId);
-                if (stillPending) {
-                    const cachedOutput = this.cellOutputs.get(cellId);
-                    if (cachedOutput && cachedOutput.body) {
-                        log(`[BetterPlutoKernel] Cell ${cellId} has cached output, ending execution (cell was likely already up-to-date)`);
-
-                        // Rebuild and show the cached output
-                        const outputs = this.buildOutputsFromCache(cellId, cachedOutput);
-                        if (outputs.length > 0) {
-                            stillPending.replaceOutput(outputs);
-                        }
-                        stillPending.end(true, Date.now());
-                        this.cellExecutions.delete(cellId);
-                        this.cellExecStates.delete(cellId);
-                    } else {
-                        // No cached output, just end the execution
-                        log(`[BetterPlutoKernel] Cell ${cellId} has no output, ending execution`);
-                        stillPending.end(true, Date.now());
-                        this.cellExecutions.delete(cellId);
-                        this.cellExecStates.delete(cellId);
-                    }
-                }
+                // The response is processed by handleCellState. A timer is not
+                // evidence of completion: long-running or queued cells must keep
+                // their execution alive until Pluto reports a terminal state.
             } catch (err) {
                 console.error('[BetterPlutoKernel] Failed to request full state:', err);
             }
@@ -953,7 +920,7 @@ class PlutoKernel {
         // Build outputs using shared method
         const outputs = this.buildOutputsFromCache(cellId, existingOutput);
 
-        if (outputs.length === 0) {return;}
+        // Keep empty output lists so reactive updates can clear an earlier result.
 
         // Find the cell by ID
         for (let i = 0; i < this.notebook.cellCount; i++) {
