@@ -102,4 +102,38 @@ suite('Pluto notebook output state', () => {
         assert.strictEqual(harness.cellExecutions.has('cell-1'), false);
     });
 
+    test('reactive updates preserve error status across partial patches and recover', async () => {
+        const completions: (boolean | undefined)[] = [];
+        execution.end = success => { completions.push(success); };
+        const flush = async () => {
+            for (const timer of harness.pendingDirectUpdates.values()) { clearTimeout(timer); }
+            harness.pendingDirectUpdates.clear();
+            await harness.executeDirectUpdate('cell-1');
+        };
+        harness.handleCellState('cell-1', { running: false, queued: false, errored: true });
+        harness.handleCellState('cell-1', { output: { body: 'upstream error', mime: 'text/plain' } });
+        await flush();
+        assert.deepStrictEqual(completions, [false]);
+        // An output-only follow-up must not reset the error flag.
+        harness.handleCellState('cell-1', { logs: [] });
+        await flush();
+        assert.deepStrictEqual(completions, [false, false]);
+        harness.handleCellState('cell-1', { running: true });
+        await flush();
+        assert.deepStrictEqual(completions, [false, false, undefined]);
+        harness.handleCellState('cell-1', { errored: false, output: { body: '41', mime: 'text/plain' } });
+        harness.handleCellState('cell-1', { running: false });
+        await flush();
+        assert.deepStrictEqual(completions, [false, false, undefined, true]);
+    });
+    test('output alone does not invent a successful execution status', async () => {
+        const completions: (boolean | undefined)[] = [];
+        execution.end = success => { completions.push(success); };
+        harness.handleCellState('cell-1', { output: { body: 'rendered', mime: 'text/plain' } });
+        for (const timer of harness.pendingDirectUpdates.values()) { clearTimeout(timer); }
+        harness.pendingDirectUpdates.clear();
+        await harness.executeDirectUpdate('cell-1');
+        assert.deepStrictEqual(completions, [undefined]);
+    });
+
 });

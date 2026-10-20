@@ -5,6 +5,7 @@
 import { spawn, ChildProcess } from 'child_process';
 import { encode, decode } from '@msgpack/msgpack';
 import { EventEmitter } from 'events';
+import { PlutoNavigationState } from './pluto-navigation';
 import { log } from './extension';
 import {
     type ProtocolLogEntry,
@@ -116,6 +117,7 @@ const defaultTransportFactory: KernelTransportFactory = {
 };
 
 export class PlutoServer extends EventEmitter {
+    readonly navigation = new PlutoNavigationState();
     private process: ChildProcess | null = null;
     private transport: KernelTransport | null = null;
     private port = 0;
@@ -389,6 +391,7 @@ export class PlutoServer extends EventEmitter {
             const type = message.type as string;
 
             if (type === 'notebook_diff') {
+                this.navigation.applyNotebookDiff(message);
                 const result = processNotebookDiff(message, {
                     cellOutputs: this.cellOutputs,
                     knownCellIds: this.knownCellIds,
@@ -643,6 +646,7 @@ export class PlutoServer extends EventEmitter {
             this.scheduler.clearInterval(timer);
         }
         this.waitTimers.clear();
+        this.navigation.clear();
         this.cellOutputs.clear();
         this.knownCellIds.clear();
         this.cellOrder = [];
