@@ -104,6 +104,26 @@ export class PlutoNavigationState {
         return isRecord(inputs) && isRecord(inputs[cellId]) && inputs[cellId].code === code;
     }
 
+    /** Direct downstream cells, grouped across all globals defined by this cell. */
+    dependentCells(cellId: string, code: string): Array<{ cellId: string; symbols: string[] }> | undefined {
+        if (!this.topologyCurrent || !this.matchesCode(cellId, code)) { return undefined; }
+        const dependencies = this.state.cell_dependencies;
+        if (!isRecord(dependencies) || !isRecord(dependencies[cellId])) { return undefined; }
+        const downstream = dependencies[cellId].downstream_cells_map;
+        if (!isRecord(downstream)) { return []; }
+        const targets = new Map<string, Set<string>>();
+        for (const [symbol, ids] of Object.entries(downstream)) {
+            if (!Array.isArray(ids)) { continue; }
+            for (const id of ids) {
+                if (typeof id !== 'string' || id === cellId) { continue; }
+                const symbols = targets.get(id) ?? new Set<string>();
+                symbols.add(symbol);
+                targets.set(id, symbols);
+            }
+        }
+        return [...targets].map(([id, symbols]) => ({ cellId: id, symbols: [...symbols].sort() }));
+    }
+
     definitionCellIds(cellId: string, code: string, symbol: string): string[] {
         if (!this.topologyCurrent || !this.matchesCode(cellId, code)) { return []; }
         const dependencies = this.state.cell_dependencies;

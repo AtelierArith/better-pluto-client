@@ -213,3 +213,14 @@ suite('pluto-protocol', () => {
         assert.strictEqual(parsed.elements?.length, 3);
     });
 });
+
+suite('pluto-protocol raster MIME bundles', () => {
+    for (const mime of ['image/gif', 'image/bmp', 'image/jpg']) {
+        test(`prefers ${mime} over text fallback and preserves exact bytes`, () => {
+            const bytes = new Uint8Array([0, 1, 2, 127, 128, 255]);
+            const output = extractOutput({ 'text/plain': 'image fallback', [mime]: bytes });
+            assert.strictEqual(output.mime, mime);
+            assert.strictEqual(output.body, Buffer.from(bytes).toString('base64'));
+        });
+    }
+});
