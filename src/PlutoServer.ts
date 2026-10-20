@@ -418,7 +418,7 @@ export class PlutoServer extends EventEmitter {
                 }
                 // Evaluate the final batch state: timestamps may precede a queued
                 // patch, and a fast run may never expose running=true separately.
-                let refreshNavigation = false;
+                let refreshNavigation = this.navigation.takeDeletionRefresh();
                 for (const cellId of terminalCandidates) {
                     const execution = this.navigationExecution.get(cellId);
                     if (execution?.running === false && execution.queued !== true) {

@@ -63,3 +63,36 @@ suite('Pluto navigation refresh after edits', () => {
         server.stop();
     });
 });
+
+suite('Pluto navigation refresh after deletion', () => {
+    test('requests one snapshot after deletion topology acknowledgement without waiting for a run', () => {
+        const server = new PlutoServer({ logger: () => undefined });
+        let requests = 0;
+        server.requestFullState = () => { requests++; };
+        const harness = server as unknown as { handleMessage(data: Buffer): void };
+        const send = (patches: unknown[]) => harness.handleMessage(Buffer.from(encode({ type: 'notebook_diff', message: { patches } })));
+        send([{ op: 'replace', path: [], value: {
+            cell_inputs: { a: { code: 'x = 1' }, b: { code: 'x + 2' }, c: { code: '123' } },
+            cell_order: ['a', 'b', 'c'],
+            cell_dependencies: { a: {}, b: { upstream_cells_map: { x: ['a'] } }, c: {} },
+        } }]);
+        send([{ op: 'remove', path: ['cell_inputs', 'c'] }]);
+        assert.strictEqual(server.navigation.needsRefresh, true);
+        assert.strictEqual(requests, 0, 'Input removal alone does not confirm topology recomputation');
+        send([{ op: 'replace', path: ['cell_dependencies', 'a'], value: {} }]);
+        assert.strictEqual(requests, 0, 'An unrelated topology patch does not acknowledge deletion');
+        send([{ op: 'remove', path: ['cell_dependencies', 'c'] }]);
+        assert.strictEqual(requests, 1);
+        send([{ op: 'remove', path: ['cell_dependencies', 'c'] }]);
+        assert.strictEqual(requests, 1);
+        send([{ op: 'replace', path: [], value: {
+            cell_inputs: { a: { code: 'x = 1' }, b: { code: 'x + 2' } },
+            cell_order: ['a', 'b'],
+            cell_dependencies: { a: {}, b: { upstream_cells_map: { x: ['a'] } } },
+        } }]);
+        assert.strictEqual(server.navigation.needsRefresh, false);
+        assert.deepStrictEqual(server.navigation.definitionCellIds('b', 'x + 2', 'x'), ['a']);
+        assert.strictEqual(requests, 1);
+        server.stop();
+    });
+});

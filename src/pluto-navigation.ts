@@ -4,6 +4,7 @@ export class PlutoNavigationState {
     private topologyCurrent = false;
     private hasSnapshot = false;
     private dirtyCellIds = new Set<string>();
+    private removedCellIds = new Set<string>();
     private refreshRequested = false;
 
     clear(): void {
@@ -11,6 +12,7 @@ export class PlutoNavigationState {
         this.topologyCurrent = false;
         this.hasSnapshot = false;
         this.dirtyCellIds.clear();
+        this.removedCellIds.clear();
         this.refreshRequested = false;
     }
 
@@ -52,13 +54,14 @@ export class PlutoNavigationState {
             this.topologyCurrent = receivedDependencies;
         } else if (changed.length || removed.length) {
             this.topologyCurrent = false;
-            for (const id of changed) { this.dirtyCellIds.add(id); }
-            for (const id of removed) { this.dirtyCellIds.delete(id); }
+            for (const id of changed) { this.dirtyCellIds.add(id); this.removedCellIds.delete(id); }
+            for (const id of removed) { this.dirtyCellIds.delete(id); this.removedCellIds.add(id); }
             this.refreshRequested = false;
-        } else if (fullSnapshot && receivedDependencies && this.dirtyCellIds.size === 0) {
+        } else if (fullSnapshot && receivedDependencies && this.dirtyCellIds.size === 0 && this.deletionsAcknowledged()) {
             // Only a complete snapshot after the changed cells have finished can
             // validate unchanged dependency maps. Unrelated partial patches cannot.
             this.topologyCurrent = true;
+            this.removedCellIds.clear();
             this.refreshRequested = false;
         }
     }
@@ -67,9 +70,26 @@ export class PlutoNavigationState {
 
     /** Return true once when all edited cells have reached a terminal run state. */
     cellFinished(cellId: string): boolean {
-        if (!this.dirtyCellIds.delete(cellId) || !this.needsRefresh || this.dirtyCellIds.size > 0 || this.refreshRequested) { return false; }
+        if (!this.dirtyCellIds.delete(cellId)) { return false; }
+        return this.requestRefreshWhenReady();
+    }
+
+    /** Deleting a cell has no terminal run; wait for its topology entry to disappear. */
+    takeDeletionRefresh(): boolean {
+        return this.removedCellIds.size > 0 && this.requestRefreshWhenReady();
+    }
+
+    private requestRefreshWhenReady(): boolean {
+        if (!this.needsRefresh || this.dirtyCellIds.size > 0 || this.refreshRequested) { return false; }
+        if (!this.deletionsAcknowledged()) { return false; }
         this.refreshRequested = true;
         return true;
+    }
+
+    private deletionsAcknowledged(): boolean {
+        const dependencies = this.state.cell_dependencies;
+        return this.removedCellIds.size === 0 || (isRecord(dependencies) &&
+            [...this.removedCellIds].every(id => !Object.hasOwn(dependencies, id)));
     }
 
     private inputCodes(): Map<string, unknown> {
