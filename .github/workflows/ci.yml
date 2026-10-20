@@ -11,7 +11,7 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -19,7 +19,13 @@ jobs:
           node-version: '22'
       - run: npm install --global yarn@1.22.22
       - run: yarn install --frozen-lockfile
+      - uses: julia-actions/setup-julia@v3
+        with:
+          version: '1.10'
+      - uses: julia-actions/cache@v2
+      - run: julia -e 'using Pkg; Pkg.add(name="Pluto", version="0.20"); Pkg.precompile()'
       - run: yarn package
       # Runs type checks, development builds and lint via the pretest script.
-      # Julia-backed integration tests remain opt-in (RUN_PLUTO_E2E=1).
       - run: xvfb-run -a yarn test
+        env:
+          RUN_PLUTO_E2E: '1'

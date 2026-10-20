@@ -13,6 +13,9 @@ import { PlutoNotebookSerializer, isCellFolded, toggleCellFolded, getCellId } fr
 import { PlutoNotebookController } from './PlutoNotebookController';
 import { isValidRendererMessage, isSetBondMessage, isShowMoreMessage } from './renderer-messages';
 
+import { PlutoDefinitionProvider } from './pluto-definition-provider';
+import { toggleBeginEnd } from './begin-end-toggle';
+
 const NOTEBOOK_TYPE = 'pluto-notebook';
 
 let controller: PlutoNotebookController | undefined;
@@ -61,8 +64,12 @@ export function activate(context: vscode.ExtensionContext) {
 
     // Register notebook controller
     log('Registering notebook controller');
-    controller = new PlutoNotebookController();
+    controller = new PlutoNotebookController(context.extension.id);
     context.subscriptions.push(controller);
+    context.subscriptions.push(vscode.languages.registerDefinitionProvider(
+        { scheme: 'vscode-notebook-cell', language: 'julia' },
+        new PlutoDefinitionProvider(notebook => controller?.getNavigation(notebook))
+    ));
     log('Notebook controller registered');
 
     // Setup renderer messaging for interactive widgets (Slider, etc.)
@@ -204,17 +211,7 @@ export function activate(context: vscode.ExtensionContext) {
 
             const originalCode = cell.document.getText();
 
-            // Check if already wrapped in begin...end
-            const trimmed = originalCode.trim();
-            if (trimmed.startsWith('begin') && trimmed.endsWith('end')) {
-                vscode.window.showInformationMessage('Cell is already wrapped in begin...end');
-                return;
-            }
-
-            // Wrap in begin...end with proper indentation
-            const lines = originalCode.split('\n');
-            const indentedLines = lines.map(line => line ? '    ' + line : line);
-            const wrappedCode = 'begin\n' + indentedLines.join('\n') + '\nend';
+            const toggled = toggleBeginEnd(originalCode);
 
             // Replace cell content
             const edit = new vscode.WorkspaceEdit();
@@ -222,10 +219,11 @@ export function activate(context: vscode.ExtensionContext) {
                 cell.document.positionAt(0),
                 cell.document.positionAt(cell.document.getText().length)
             );
-            edit.replace(cell.document.uri, fullRange, wrappedCode);
+            edit.replace(cell.document.uri, fullRange, toggled.code);
             await vscode.workspace.applyEdit(edit);
 
-            vscode.window.showInformationMessage('Cell wrapped in begin...end');
+            vscode.window.showInformationMessage(toggled.unwrapped
+                ? 'Removed outer begin...end' : 'Cell wrapped in begin...end');
         })
     );
 

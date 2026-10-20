@@ -5,6 +5,7 @@
 import { spawn, ChildProcess } from 'child_process';
 import { encode, decode } from '@msgpack/msgpack';
 import { EventEmitter } from 'events';
+import { PlutoNavigationState } from './pluto-navigation';
 import { log } from './extension';
 import {
     type ProtocolLogEntry,
@@ -116,6 +117,8 @@ const defaultTransportFactory: KernelTransportFactory = {
 };
 
 export class PlutoServer extends EventEmitter {
+    readonly navigation = new PlutoNavigationState();
+    private navigationExecution = new Map<string, { running?: boolean; queued?: boolean }>();
     private process: ChildProcess | null = null;
     private transport: KernelTransport | null = null;
     private port = 0;
@@ -389,6 +392,7 @@ export class PlutoServer extends EventEmitter {
             const type = message.type as string;
 
             if (type === 'notebook_diff') {
+                this.navigation.applyNotebookDiff(message);
                 const result = processNotebookDiff(message, {
                     cellOutputs: this.cellOutputs,
                     knownCellIds: this.knownCellIds,
@@ -401,9 +405,27 @@ export class PlutoServer extends EventEmitter {
                 this.cellOrder = result.nextState.cellOrder;
                 this.pendingCellIds = result.nextState.pendingCellIds;
 
+                const patches = (message.message as { patches?: Array<{ path?: unknown[] }> } | undefined)?.patches;
+                const fullSnapshot = Array.isArray(patches) && patches.some(patch => Array.isArray(patch.path) && patch.path.length === 0);
+                const terminalCandidates = new Set<string>();
                 for (const event of result.events) {
+                    const execution = this.navigationExecution.get(event.cellId) ?? {};
+                    if (event.state.running !== undefined) { execution.running = event.state.running; }
+                    if (event.state.queued !== undefined) { execution.queued = event.state.queued; }
+                    this.navigationExecution.set(event.cellId, execution);
+                    if (!fullSnapshot && (event.state.running === false || event.state.queued === false)) { terminalCandidates.add(event.cellId); }
                     this.emit('cellState', event.cellId, event.state);
                 }
+                // Evaluate the final batch state: timestamps may precede a queued
+                // patch, and a fast run may never expose running=true separately.
+                let refreshNavigation = this.navigation.takeDeletionRefresh();
+                for (const cellId of terminalCandidates) {
+                    const execution = this.navigationExecution.get(cellId);
+                    if (execution?.running === false && execution.queued !== true) {
+                        refreshNavigation = this.navigation.cellFinished(cellId) || refreshNavigation;
+                    }
+                }
+                if (refreshNavigation) { this.requestFullState(); }
             }
         } catch (err) {
             this.logger(`[BetterPlutoServer] Failed to process message: ${err}`);
@@ -643,6 +665,8 @@ export class PlutoServer extends EventEmitter {
             this.scheduler.clearInterval(timer);
         }
         this.waitTimers.clear();
+        this.navigation.clear();
+        this.navigationExecution.clear();
         this.cellOutputs.clear();
         this.knownCellIds.clear();
         this.cellOrder = [];

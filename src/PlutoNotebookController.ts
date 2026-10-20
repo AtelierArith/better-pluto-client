@@ -7,9 +7,10 @@ import { PlutoServer, CellState, LogEntry } from './PlutoServer';
 import { getCellId, setCellId } from './PlutoNotebookSerializer';
 import { generateCellId, parse as parsePlutoNotebook } from './PlutoNotebookParser';
 import { isPlutoObjectId, escapeHtml } from './output-utils';
-import { accumulateExecutionState, shouldEndExecution } from './cell-state-machine';
+import { accumulateExecutionState, shouldEndExecution, type CellExecutionState } from './cell-state-machine';
 import { type NotebookOutputAdapter, VscodeNotebookOutputAdapter } from './notebook-output-adapter';
 import * as fs from 'fs';
+import { PlutoNavigationState } from './pluto-navigation';
 import { log } from './extension';
 
 const NOTEBOOK_TYPE = 'pluto-notebook';
@@ -27,6 +28,8 @@ export class PlutoKernel {
     private lastStateUpdateAt = new Map<string, number>();  // Track last state update per cell
     private pendingStateSync = new Map<string, NodeJS.Timeout>();  // Missing update fallback
     private cellExecStates = new Map<string, { running?: boolean; queued?: boolean; errored?: boolean; runtime?: number }>();  // Accumulated execution state for completion detection
+    // Retain server status after an execution ends, including partial reactive updates.
+    private reportedCellStates = new Map<string, CellExecutionState>();
     private knownCellIds = new Set<string>();  // Cell IDs that Pluto knows about
     private outputAdapter: NotebookOutputAdapter;
 
@@ -46,6 +49,10 @@ export class PlutoKernel {
 
     get isRunning(): boolean {
         return this._isRunning;
+    }
+
+    get navigation(): PlutoNavigationState {
+        return this.server.navigation;
     }
 
     get notebookUri(): vscode.Uri {
@@ -182,6 +189,7 @@ export class PlutoKernel {
         }
         this.cellExecutions.clear();
         this.cellExecStates.clear();
+        this.reportedCellStates.clear();
 
         // Clear known cells - they'll be re-discovered when kernel restarts
         this.knownCellIds.clear();
@@ -225,6 +233,7 @@ export class PlutoKernel {
         }
         this.cellExecutions.clear();
         this.cellExecStates.clear();
+        this.reportedCellStates.clear();
     }
 
     /**
@@ -525,6 +534,7 @@ export class PlutoKernel {
                     this.knownCellIds.delete(cellId);
                     this.cellOutputs.delete(cellId);
                     this.modifiedCellIds.delete(cellId);
+                    this.reportedCellStates.delete(cellId);
                 }
             }
 
@@ -749,6 +759,9 @@ export class PlutoKernel {
         log(`[BetterPlutoKernel] Cell state update for ${cellId}: ${JSON.stringify(state).slice(0, 200)}`);
         log(`[BetterPlutoKernel] State details for ${cellId}: running=${state.running}, queued=${state.queued}, errored=${state.errored}, runtime=${state.runtime}`);
         this.lastStateUpdateAt.set(cellId, Date.now());
+        this.reportedCellStates.set(cellId, accumulateExecutionState(
+            this.reportedCellStates.get(cellId) ?? {}, state
+        ));
 
         // Accumulate execution state for completion detection.
         // Pluto sends partial updates (e.g., only queued=false) in separate events.
@@ -936,7 +949,15 @@ export class PlutoKernel {
                     execution = this.controller.createNotebookCellExecution(cell);
                     execution.start(Date.now());
                     await execution.replaceOutput(outputs);
-                    execution.end(true, Date.now());
+                    const status = this.reportedCellStates.get(cellId);
+                    // Rendering output is not proof of successful execution. In
+                    // particular, reactive error payloads can arrive in separate
+                    // patches from their errored flag.
+                    const success = status?.running || status?.queued
+                        ? undefined
+                        : status?.errored === true ? false
+                        : status?.errored === false && status.running === false ? true : undefined;
+                    execution.end(success, Date.now());
 
                     console.log(`[BetterPlutoKernel] Updated cell ${cellId} successfully`);
                 } catch (err) {
@@ -1580,6 +1601,11 @@ export class PlutoNotebookController implements vscode.Disposable {
     private kernels = new Map<string, PlutoKernel>();
     private disposables: vscode.Disposable[] = [];
 
+    getNavigation(notebook: vscode.NotebookDocument): PlutoNavigationState | undefined {
+        const kernel = this.kernels.get(notebook.uri.toString());
+        return kernel?.isRunning ? kernel.navigation : undefined;
+    }
+
     /**
      * Set a bond value for a notebook (for interactive widgets like Slider)
      */
@@ -1623,7 +1649,7 @@ export class PlutoNotebookController implements vscode.Disposable {
         }
     }
 
-    constructor() {
+    constructor(private readonly extensionId: string) {
         this.controller = vscode.notebooks.createNotebookController(
             'pluto-kernel',
             NOTEBOOK_TYPE,
@@ -1715,9 +1741,17 @@ export class PlutoNotebookController implements vscode.Disposable {
      * Start kernel for a notebook
      */
     async startKernel(notebook: vscode.NotebookDocument): Promise<void> {
-        // Associate this controller with the notebook so createNotebookCellExecution succeeds
-        // (e.g. when startKernel is run from command palette or E2E tests without prior kernel selection)
+        // Affinity is only a recommendation; it does not associate a controller.
+        // Select the exact controller before starting Julia or creating executions.
         this.controller.updateNotebookAffinity(notebook, vscode.NotebookControllerAffinity.Preferred);
+        if (vscode.window.activeNotebookEditor?.notebook !== notebook) {
+            await vscode.window.showNotebookDocument(notebook);
+        }
+        const selected = await vscode.commands.executeCommand<boolean>('notebook.selectKernel', {
+            extension: this.extensionId,
+            id: this.controller.id,
+        });
+        if (!selected) { throw new Error('Could not select the Pluto notebook kernel.'); }
         const kernel = await this.getOrCreateKernel(notebook);
         await kernel.start();
     }

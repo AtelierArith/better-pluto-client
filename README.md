@@ -145,3 +145,25 @@ Unit tests live in `src/test/` and cover parser/serializer, protocol decoding, e
 ## License
 
 MIT
+
+### Cell navigation and begin/end toggle
+
+`Ctrl+Shift+B` (`Cmd+Shift+B` on macOS) toggles a standalone outer `begin`/`end`
+block. The toggle preserves body whitespace, including multiline literal data;
+ambiguous Julia syntax is wrapped rather than destructively unwrapped.
+
+With a running kernel, Go to Definition can navigate simple global expressions
+to the defining notebook cell using Pluto's dependency graph. It goes to the
+start of that cell, not an exact source range. Unsynchronized edits and complex
+lexical scopes are deliberately left to the Julia language server. Cross-cell
+Find References and full language-server parity are not implemented.
+
+CI runs Julia-backed regression tests for unchanged manual reruns and dependency
+error recovery, in addition to the extension tests. Run locally with Pluto
+installed in Julia's active environment and `RUN_PLUTO_E2E=1 yarn test`.
+
+Dependency errors follow Pluto itself: dependent cells may execute statements
+before an undefined upstream value is accessed. This client does not promise
+transactional rollback or suppression of those side effects. The regression
+checks failed status and automatic successful recovery after fixing the upstream
+cell, not a stronger side-effect-blocking guarantee.
