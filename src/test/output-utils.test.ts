@@ -1,5 +1,5 @@
 import * as assert from 'assert';
-import { isPlutoObjectId, buildOutputItems, CachedOutput, escapeHtml, renderStdoutAsHtml } from '../output-utils';
+import { isPlutoObjectId, buildOutputItems, CachedOutput, escapeHtml, renderStdoutAsHtml, renderPlutoTableAsHtml } from '../output-utils';
 
 suite('Output Utils - isPlutoObjectId', () => {
     test('returns true for valid 14-char hex objectid', () => {
@@ -404,5 +404,104 @@ suite('Output Utils - renderStdoutAsHtml', () => {
         assert.ok(html.includes('x &gt; 0'));
         assert.ok(html.includes('y &lt; 10'));
         assert.ok(html.includes('&quot;test&quot;'));
+    });
+});
+
+suite('Output Utils - Pluto table MIME', () => {
+    const table = {
+        objectid: 'abc123',
+        schema: { names: ['a'], types: ['Int64'] },
+        rows: [[1, [['1', 'text/plain']]], [2, [['2', 'text/plain']]]]
+    };
+
+    test('routes a DataFrame payload through the existing HTML renderer', () => {
+        const [item] = buildOutputItems({
+            body: JSON.stringify(table), mime: 'application/vnd.pluto.table+object'
+        });
+        assert.strictEqual(item.mime, 'application/vnd.pluto.html+html');
+        assert.ok(String(item.content).includes('<th>a</th>'));
+        assert.ok(String(item.content).includes('<th>Int64</th>'));
+        assert.ok(String(item.content).includes('<tr><th>2</th><td>2</td></tr>'));
+    });
+
+    test('escapes names, types, row indices, HTML cells and nested object cells', () => {
+        const html = renderPlutoTableAsHtml(JSON.stringify({
+            schema: { names: ['<img src=x onerror="alert(1)">'], types: ['A&B'] },
+            rows: [['<script>', [
+                ['<b>hello</b>', 'text/html'],
+                [{ child: '<script>unsafe</script>' }, 'application/vnd.pluto.tree+object']
+            ]]]
+        }))!;
+        assert.ok(html.includes('&lt;img'));
+        assert.ok(html.includes('A&amp;B'));
+        assert.ok(html.includes('&lt;script&gt;'));
+        assert.ok(html.includes('&lt;b&gt;hello&lt;/b&gt;'));
+        assert.ok(!html.includes('<script>'));
+        assert.ok(!html.includes('<img'));
+        assert.ok(!html.includes('<b>'));
+    });
+
+    test('renders empty schema and empty rows without throwing', () => {
+        const html = renderPlutoTableAsHtml(JSON.stringify({ schema: null, rows: [] }))!;
+        assert.ok(html.includes('No columns'));
+        assert.ok(html.includes('No rows'));
+        assert.ok(!html.includes('undefined'));
+    });
+
+    test('renders a zero-row table with its column names', () => {
+        const html = renderPlutoTableAsHtml(JSON.stringify({ ...table, rows: [] }))!;
+        assert.ok(html.includes('<th>a</th>'));
+        assert.ok(html.includes('No rows'));
+    });
+
+    test('uses the existing show-more contract for row and column sentinels', () => {
+        const html = renderPlutoTableAsHtml(JSON.stringify({
+            objectid: 'object"&',
+            schema: { names: ['a', 'more'], types: ['Int64', 'more'] },
+            rows: [[1, [['1', 'text/plain'], 'more']], 'more']
+        }), 'cell"&')!;
+        assert.ok(html.includes('data-cellid="cell&quot;&amp;"'));
+        assert.ok(html.includes('data-objectid="object&quot;&amp;"'));
+        assert.ok(html.includes('data-dim="1"'));
+        assert.ok(html.includes('data-dim="2"'));
+        assert.ok(html.includes('<td></td>'));
+        assert.ok(!html.includes('undefined'));
+    });
+
+    test('shows explicit truncation text when expansion identifiers are missing', () => {
+        const html = renderPlutoTableAsHtml(JSON.stringify({ rows: ['more'] }))!;
+        assert.ok(html.includes('(more data not shown)'));
+        assert.ok(!html.includes('pluto-tree-more'));
+    });
+
+    test('falls back to plain text for malformed payloads', () => {
+        for (const body of ['not json', 'null', '[]', '{"schema":42}',
+            '{"schema":{"names":"a"}}', '{"rows":[123]}', '{"rows":[[1,[42]]]}']) {
+            assert.strictEqual(renderPlutoTableAsHtml(body), null);
+            assert.deepStrictEqual(buildOutputItems({ body, mime: 'application/vnd.pluto.table+object' }), [
+                { type: 'text', content: body, mime: 'text/plain' }
+            ]);
+        }
+    });
+
+    test('waits for actual data when a table is only a lazy object identifier', () => {
+        assert.deepStrictEqual(buildOutputItems({
+            body: '0123456789abcdef', mime: 'application/vnd.pluto.table+object'
+        }), []);
+    });
+
+    test('table text containing syntax error words is still data, not stderr', () => {
+        const [item] = buildOutputItems({
+            body: JSON.stringify({ ...table, rows: [[1, [['syntax: data', 'text/plain']]]] }),
+            mime: 'application/vnd.pluto.table+object'
+        });
+        assert.strictEqual(item.type, 'text');
+        assert.strictEqual(item.mime, 'application/vnd.pluto.html+html');
+    });
+
+    test('unknown structured Pluto MIME falls back to readable plain text', () => {
+        assert.deepStrictEqual(buildOutputItems({
+            body: '{"value":"example"}', mime: 'application/vnd.pluto.unknown+object'
+        }), [{ type: 'text', content: '{"value":"example"}', mime: 'text/plain' }]);
     });
 });

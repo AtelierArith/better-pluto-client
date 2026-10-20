@@ -72,7 +72,16 @@ export function buildOutputItems(
     if (cachedOutput.body) {
         const mime = cachedOutput.mime || 'text/plain';
 
-        if (mime === 'application/vnd.pluto.stacktrace+object') {
+        if (mime === 'application/vnd.pluto.table+object') {
+            if (!isPlutoObjectId(cachedOutput.body)) {
+                const tableHtml = renderPlutoTableAsHtml(cachedOutput.body, options?.cellId);
+                items.push({
+                    type: 'text',
+                    content: tableHtml ?? cachedOutput.body,
+                    mime: tableHtml === null ? 'text/plain' : 'application/vnd.pluto.html+html'
+                });
+            }
+        } else if (mime === 'application/vnd.pluto.stacktrace+object') {
             const errorText = options?.parseError
                 ? options.parseError(cachedOutput.body, mime)
                 : cachedOutput.body;
@@ -155,6 +164,14 @@ export function buildOutputItems(
                 content: cachedOutput.body,
                 mime: 'text/plain'
             });
+        } else if (mime.startsWith('application/vnd.pluto.') && mime.endsWith('+object')) {
+            // VS Code has no renderer for Pluto's other structured MIME types.
+            // Preserve their data as readable text rather than a missing-renderer error.
+            items.push({
+                type: 'text',
+                content: cachedOutput.body,
+                mime: 'text/plain'
+            });
         } else {
             items.push({
                 type: 'text',
@@ -177,6 +194,66 @@ export function escapeHtml(str: string): string {
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#039;');
+}
+
+/**
+ * Render the schema/rows format emitted by Pluto's TableView (e.g. DataFrames).
+ * Nested MIME values intentionally use escaped text, not executable HTML.
+ * Return null for malformed payloads so callers can display the original text.
+ */
+export function renderPlutoTableAsHtml(body: string, cellId?: string): string | null {
+    try {
+        const table: unknown = JSON.parse(body);
+        if (!table || typeof table !== 'object' || Array.isArray(table)) { return null; }
+        const value = table as Record<string, unknown>;
+        const schema = value.schema;
+        if (schema !== null && schema !== undefined &&
+            (typeof schema !== 'object' || Array.isArray(schema))) { return null; }
+        const fields = (schema ?? {}) as Record<string, unknown>;
+        const names = fields.names ?? [];
+        const types = fields.types ?? [];
+        const rows = value.rows ?? [];
+        if (!Array.isArray(names) || !Array.isArray(types) || !Array.isArray(rows)) { return null; }
+        const text = (item: unknown): string => escapeHtml(
+            typeof item === 'string' ? item : JSON.stringify(item) ?? ''
+        );
+        const more = (dimension: 1 | 2): string => {
+            if (cellId && typeof value.objectid === 'string' && value.objectid) {
+                return `<pluto-tree-more data-cellid="${escapeHtml(cellId)}" data-objectid="${escapeHtml(value.objectid)}" data-dim="${dimension}">show more</pluto-tree-more>`;
+            }
+            return '<span>(more data not shown)</span>';
+        };
+        const colspan = names.length + 1;
+        const head = names.length === 0
+            ? '<tr><th>No columns</th></tr>'
+            : `<tr><th></th>${names.map(name => `<th>${name === 'more' ? more(2) : text(name)}</th>`).join('')}</tr>` +
+              `<tr><th></th>${names.map((name, index) => `<th>${name === 'more' ? '' : text(types[index])}</th>`).join('')}</tr>`;
+        const renderedRows: string[] = [];
+        for (const row of rows) {
+            if (row === 'more') {
+                renderedRows.push(`<tr><td colspan="${colspan}">${more(1)}</td></tr>`);
+                continue;
+            }
+            if (!Array.isArray(row) || row.length !== 2 || !Array.isArray(row[1])) { return null; }
+            const cells: string[] = [];
+            for (const pair of row[1]) {
+                if (pair === 'more') {
+                    cells.push('<td></td>');
+                } else if (Array.isArray(pair) && pair.length === 2 && typeof pair[1] === 'string') {
+                    cells.push(`<td>${text(pair[0])}</td>`);
+                } else {
+                    return null;
+                }
+            }
+            renderedRows.push(`<tr><th>${text(row[0])}</th>${cells.join('')}</tr>`);
+        }
+        const contents = renderedRows.length > 0
+            ? renderedRows.join('')
+            : `<tr><td colspan="${colspan}">No rows</td></tr>`;
+        return `<table class="pluto-table"><thead>${head}</thead><tbody>${contents}</tbody></table>`;
+    } catch {
+        return null;
+    }
 }
 
 /**
