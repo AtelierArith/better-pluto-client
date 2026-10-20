@@ -30,9 +30,15 @@ suite('Pluto navigation topology', () => {
         state.applyNotebookDiff({ message: { patches: [{ op: 'replace', path: ['cell_inputs', 'b', 'code'], value: 'x + 3' }] } });
         assert.deepStrictEqual(state.definitionCellIds('b', 'x + 3', 'x'), []);
         state.applyNotebookDiff({ message: { patches: [{ op: 'replace', path: ['cell_dependencies', 'b', 'upstream_cells_map'], value: { x: ['a'] } }] } });
+        assert.deepStrictEqual(state.definitionCellIds('b', 'x + 3', 'x'), []);
+        assert.strictEqual(state.cellFinished('a'), false);
+        assert.strictEqual(state.cellFinished('b'), true);
+        assert.strictEqual(state.cellFinished('b'), false);
+        const snapshot = initial(); snapshot.message.patches[0].value.cell_inputs.b.code = 'x + 3';
+        state.applyNotebookDiff(snapshot);
         assert.deepStrictEqual(state.definitionCellIds('b', 'x + 3', 'x'), ['a']);
     });
-    test('accepts same-message graph and input updates in either order', () => {
+    test('keeps both same-message patch orders stale until a complete post-run snapshot', () => {
         for (const reverse of [false, true]) {
             const state = new PlutoNavigationState(); state.applyNotebookDiff(initial());
             const patches = [
@@ -40,7 +46,8 @@ suite('Pluto navigation topology', () => {
                 { op: 'replace', path: ['cell_dependencies', 'b', 'upstream_cells_map'], value: { x: ['a'] } },
             ];
             state.applyNotebookDiff({ message: { patches: reverse ? patches.reverse() : patches } });
-            assert.deepStrictEqual(state.definitionCellIds('b', 'x + 3', 'x'), ['a']);
+            assert.deepStrictEqual(state.definitionCellIds('b', 'x + 3', 'x'), []);
+            assert.strictEqual(state.cellFinished('b'), true);
         }
     });
     test('resets on full snapshots and kernel shutdown', () => {

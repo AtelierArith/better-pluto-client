@@ -1649,7 +1649,7 @@ export class PlutoNotebookController implements vscode.Disposable {
         }
     }
 
-    constructor() {
+    constructor(private readonly extensionId: string) {
         this.controller = vscode.notebooks.createNotebookController(
             'pluto-kernel',
             NOTEBOOK_TYPE,
@@ -1741,9 +1741,17 @@ export class PlutoNotebookController implements vscode.Disposable {
      * Start kernel for a notebook
      */
     async startKernel(notebook: vscode.NotebookDocument): Promise<void> {
-        // Associate this controller with the notebook so createNotebookCellExecution succeeds
-        // (e.g. when startKernel is run from command palette or E2E tests without prior kernel selection)
+        // Affinity is only a recommendation; it does not associate a controller.
+        // Select the exact controller before starting Julia or creating executions.
         this.controller.updateNotebookAffinity(notebook, vscode.NotebookControllerAffinity.Preferred);
+        if (vscode.window.activeNotebookEditor?.notebook !== notebook) {
+            await vscode.window.showNotebookDocument(notebook);
+        }
+        const selected = await vscode.commands.executeCommand<boolean>('notebook.selectKernel', {
+            extension: this.extensionId,
+            id: this.controller.id,
+        });
+        if (!selected) { throw new Error('Could not select the Pluto notebook kernel.'); }
         const kernel = await this.getOrCreateKernel(notebook);
         await kernel.start();
     }

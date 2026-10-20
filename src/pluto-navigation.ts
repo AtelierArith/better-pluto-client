@@ -2,16 +2,22 @@
 export class PlutoNavigationState {
     private state: Record<string, unknown> = Object.create(null);
     private topologyCurrent = false;
+    private hasSnapshot = false;
+    private dirtyCellIds = new Set<string>();
+    private refreshRequested = false;
 
     clear(): void {
         this.state = Object.create(null);
         this.topologyCurrent = false;
+        this.hasSnapshot = false;
+        this.dirtyCellIds.clear();
+        this.refreshRequested = false;
     }
 
     applyNotebookDiff(message: Record<string, unknown>): void {
         const content = message.message as { patches?: unknown } | undefined;
         if (!Array.isArray(content?.patches)) { return; }
-        const previousInputs = this.codeSignature();
+        const previousInputs = this.inputCodes();
         let receivedDependencies = false;
         let fullSnapshot = false;
         for (const patch of content.patches) {
@@ -20,7 +26,7 @@ export class PlutoNavigationState {
             if (path.length === 0 && (patch.op === 'replace' || patch.op === 'add')) {
                 fullSnapshot = true;
                 receivedDependencies = isRecord(patch.value) && isRecord(patch.value.cell_dependencies);
-                this.clear();
+                this.state = Object.create(null);
                 if (isRecord(patch.value)) {
                     for (const key of ['cell_dependencies', 'cell_inputs']) {
                         if (isRecord(patch.value[key])) {
@@ -38,20 +44,39 @@ export class PlutoNavigationState {
             applyPatch(this.state, path as Array<string | number>, patch.op, patch.value);
             receivedDependencies ||= path[0] === 'cell_dependencies';
         }
-        // Input synchronization can precede Pluto's dependency recomputation.
-        // Assess the whole message so patch ordering does not matter.
-        if (fullSnapshot || receivedDependencies) {
+        const currentInputs = this.inputCodes();
+        const changed = [...currentInputs.keys()].filter(id => previousInputs.get(id) !== currentInputs.get(id));
+        const removed = [...previousInputs.keys()].filter(id => !currentInputs.has(id));
+        if (fullSnapshot && !this.hasSnapshot) {
+            this.hasSnapshot = true;
             this.topologyCurrent = receivedDependencies;
-        } else if (previousInputs !== this.codeSignature()) {
+        } else if (changed.length || removed.length) {
             this.topologyCurrent = false;
+            for (const id of changed) { this.dirtyCellIds.add(id); }
+            for (const id of removed) { this.dirtyCellIds.delete(id); }
+            this.refreshRequested = false;
+        } else if (fullSnapshot && receivedDependencies && this.dirtyCellIds.size === 0) {
+            // Only a complete snapshot after the changed cells have finished can
+            // validate unchanged dependency maps. Unrelated partial patches cannot.
+            this.topologyCurrent = true;
+            this.refreshRequested = false;
         }
     }
 
-    private codeSignature(): string {
+    get needsRefresh(): boolean { return this.hasSnapshot && !this.topologyCurrent; }
+
+    /** Return true once when all edited cells have reached a terminal run state. */
+    cellFinished(cellId: string): boolean {
+        if (!this.dirtyCellIds.delete(cellId) || !this.needsRefresh || this.dirtyCellIds.size > 0 || this.refreshRequested) { return false; }
+        this.refreshRequested = true;
+        return true;
+    }
+
+    private inputCodes(): Map<string, unknown> {
         const inputs = this.state.cell_inputs;
-        return JSON.stringify(isRecord(inputs)
-            ? Object.keys(inputs).sort().map(id => [id, isRecord(inputs[id]) ? inputs[id].code : null])
-            : null);
+        return new Map(isRecord(inputs)
+            ? Object.keys(inputs).map(id => [id, isRecord(inputs[id]) ? inputs[id].code : null])
+            : []);
     }
 
     matchesCode(cellId: string, code: string): boolean {

@@ -55,7 +55,7 @@ suite('Pluto issue #94 regressions (real Julia)', () => {
             assert.ok(await vscode.workspace.applyEdit(edit));
             editor.selection = new vscode.NotebookRange(1, 2);
             await vscode.commands.executeCommand('notebook.cell.execute');
-            await until(() => output(notebook.cellAt(2)).trim() === '41', 'dependent automatically recovers');
+            await until(() => output(notebook.cellAt(2)).trim() === '41' && notebook.cellAt(2).executionSummary?.success === true, 'dependent automatically recovers successfully');
             assert.strictEqual(fs.readFileSync(markerPath, 'utf8'), 'executed');
         } finally {
             await vscode.commands.executeCommand('pluto-notebook.stopKernel');

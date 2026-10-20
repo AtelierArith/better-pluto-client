@@ -64,7 +64,7 @@ export function activate(context: vscode.ExtensionContext) {
 
     // Register notebook controller
     log('Registering notebook controller');
-    controller = new PlutoNotebookController();
+    controller = new PlutoNotebookController(context.extension.id);
     context.subscriptions.push(controller);
     context.subscriptions.push(vscode.languages.registerDefinitionProvider(
         { scheme: 'vscode-notebook-cell', language: 'julia' },
