@@ -1,4 +1,5 @@
 import * as assert from 'assert';
+import { shouldEndExecution } from '../cell-state-machine';
 import {
     extractLogs,
     extractOutput,
@@ -17,6 +18,26 @@ function createState(): ProtocolRuntimeState {
 }
 
 suite('pluto-protocol', () => {
+    test('full cell results preserve queued state', () => {
+        const result = processNotebookDiff({
+            type: 'notebook_diff',
+            message: { patches: [{ op: 'replace', path: [], value: {
+                cell_results: { 'cell-1': { running: false, queued: true, errored: false } }
+            } }] }
+        }, createState());
+        assert.strictEqual(result.events[0].state.running, false);
+        assert.strictEqual(result.events[0].state.queued, true);
+        assert.strictEqual(shouldEndExecution(result.events[0].state), false);
+    });
+
+    test('removing logs emits an explicit empty list', () => {
+        const result = processNotebookDiff({
+            type: 'notebook_diff',
+            message: { patches: [{ op: 'remove', path: ['cell_results', 'cell-1', 'logs'] }] }
+        }, createState());
+        assert.deepStrictEqual(result.events[0].state.logs, []);
+    });
+
     test('tryDecodeMsgpackBinary decodes image bytes to base64', () => {
         const bytes = new Uint8Array([137, 80, 78, 71, 0, 1, 2, 3]);
         const output = tryDecodeMsgpackBinary(bytes, 'image/png');

@@ -545,13 +545,8 @@ suite('PlutoServer public API behavior', () => {
         assert.strictEqual(server.isKnownCell('c'), false);
     });
 
-    test('updateCellOrder keeps internal order copy-safe', async () => {
-        const server = new PlutoServer({
-            scheduler: new NoopScheduler(),
-            processRunner: new NoopProcessRunner(),
-            transportFactory: new NoopTransportFactory(),
-            logger: () => {},
-        });
+    test('updateCellOrder keeps internal order copy-safe after a successful send', async () => {
+        const server = createServerWithTransport(new RecordingTransport());
 
         const input = ['x', 'y'];
         await server.updateCellOrder(input);
@@ -559,4 +554,13 @@ suite('PlutoServer public API behavior', () => {
 
         assert.deepStrictEqual(server.getCellOrder(), ['x', 'y']);
     });
+    test('updateCellOrder preserves local order when the transport is unavailable', async () => {
+        const transport = new RecordingTransport();
+        const server = createServerWithTransport(transport);
+        await server.updateCellOrder(['original']);
+        transport.readyState = () => 0;
+        await server.updateCellOrder(['unsent']);
+        assert.deepStrictEqual(server.getCellOrder(), ['original']);
+    });
+
 });
