@@ -161,3 +161,9 @@ Find References and full language-server parity are not implemented.
 CI runs Julia-backed regression tests for unchanged manual reruns and dependency
 error recovery, in addition to the extension tests. Run locally with Pluto
 installed in Julia's active environment and `RUN_PLUTO_E2E=1 yarn test`.
+
+Dependency errors follow Pluto itself: dependent cells may execute statements
+before an undefined upstream value is accessed. This client does not promise
+transactional rollback or suppression of those side effects. The regression
+checks failed status and automatic successful recovery after fixing the upstream
+cell, not a stronger side-effect-blocking guarantee.

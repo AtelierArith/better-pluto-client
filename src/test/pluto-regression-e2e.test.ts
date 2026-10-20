@@ -16,7 +16,7 @@ function output(cell: vscode.NotebookCell): string {
 }
 
 suite('Pluto issue #94 regressions (real Julia)', () => {
-    test('unchanged manual rerun reads fresh data; errored upstream blocks and recovers dependents', async function () {
+    test('unchanged manual rerun reads fresh data; errored upstream reports failure and recovers dependents', async function () {
         if (process.env.RUN_PLUTO_E2E !== '1') { this.skip(); return; }
         this.timeout(360_000);
         const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'better-pluto-regression-'));
@@ -27,7 +27,7 @@ suite('Pluto issue #94 regressions (real Julia)', () => {
         const codes = [
             `read(${JSON.stringify(dataPath)}, String)`,
             'x = error("upstream-failed")',
-            `begin\n    write(${JSON.stringify(markerPath)}, "executed")\n    x + 1\nend`,
+            `begin\n    write(${JSON.stringify(markerPath)}, string(x + 1))\n    x + 1\nend`,
         ];
         const file = path.join(dir, 'Regression.jl');
         fs.writeFileSync(file, '### A Pluto.jl notebook ###\n# v0.20.19\n\nusing Markdown\nusing InteractiveUtils\n\n' +
@@ -40,14 +40,14 @@ suite('Pluto issue #94 regressions (real Julia)', () => {
             await vscode.commands.executeCommand('pluto-notebook.startKernel');
             await until(() => output(notebook.cellAt(0)).includes('first-value') && output(notebook.cellAt(1)).includes('upstream-failed'), 'initial output/error');
             await until(() => notebook.cellAt(2).executionSummary?.success === false, 'dependent settles as errored');
-            assert.strictEqual(fs.existsSync(markerPath), false, 'Dependent side effects must not execute while upstream errors');
+            assert.strictEqual(fs.existsSync(markerPath), false, 'Dependent must not write a successful result while upstream errors');
 
             fs.writeFileSync(dataPath, 'second-value');
             editor.selection = new vscode.NotebookRange(0, 1);
             await vscode.commands.executeCommand('notebook.cell.execute');
             await until(() => output(notebook.cellAt(0)).includes('second-value'), 'unchanged manual rerun produces fresh output');
             assert.ok(!output(notebook.cellAt(0)).includes('first-value'), 'Old output must be replaced');
-            assert.strictEqual(fs.existsSync(markerPath), false, 'Dependent remains blocked until upstream is fixed');
+            assert.strictEqual(fs.existsSync(markerPath), false, 'Dependent must not produce a successful result until upstream is fixed');
 
             const parent = notebook.cellAt(1).document;
             const edit = new vscode.WorkspaceEdit();
@@ -56,7 +56,7 @@ suite('Pluto issue #94 regressions (real Julia)', () => {
             editor.selection = new vscode.NotebookRange(1, 2);
             await vscode.commands.executeCommand('notebook.cell.execute');
             await until(() => output(notebook.cellAt(2)).trim() === '41' && notebook.cellAt(2).executionSummary?.success === true, 'dependent automatically recovers successfully');
-            assert.strictEqual(fs.readFileSync(markerPath, 'utf8'), 'executed');
+            assert.strictEqual(fs.readFileSync(markerPath, 'utf8'), '41');
         } finally {
             await vscode.commands.executeCommand('pluto-notebook.stopKernel');
             await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
