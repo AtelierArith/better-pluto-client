@@ -24,7 +24,7 @@ export interface ProtocolCellState {
 }
 
 export interface ProtocolRuntimeState {
-    cellOutputs: Map<string, { body?: string; mime?: string }>;
+    cellOutputs: Map<string, { body?: string; mime?: string; rawBody?: unknown }>;
     knownCellIds: Set<string>;
     cellOrder: string[];
     pendingCellIds: Set<string>;
@@ -300,6 +300,13 @@ export function extractOutput(output: Record<string, unknown>): ProtocolCellOutp
     return { body: '', mime: mimeFromShape };
 }
 
+// Preserve the same wire payload extractOutput selected, not a plain fallback.
+function selectedRawBody(value: unknown, output: ProtocolCellOutput): unknown {
+    if (!value || typeof value !== 'object') { return undefined; }
+    const record = value as Record<string, unknown>;
+    return record[output.mime] !== undefined ? record[output.mime] : record.body;
+}
+
 export function processNotebookDiff(
     message: Record<string, unknown>,
     state: ProtocolRuntimeState
@@ -321,18 +328,17 @@ export function processNotebookDiff(
     const nextState = cloneState(state);
     const events: ProtocolCellStateEvent[] = [];
 
-    const isOutputSubField = (p: { path: (string | number)[] }): boolean => {
-        return p.path[0] === 'cell_results' && p.path.length >= 4 && p.path[2] === 'output';
-    };
-
-    const outputPatches = patches.filter(isOutputSubField);
-    const otherPatches = patches.filter((p) => !isOutputSubField(p));
-
-    for (const patch of [...outputPatches, ...otherPatches]) {
+    // Apply wire patches in their original order, retaining raw payloads until
+    // the final MIME is known. Emit only final output values after the batch.
+    for (const patch of patches) {
         const path = patch.path;
 
         if (path.length === 0 && patch.op === 'replace') {
             const fullState = patch.value as Record<string, unknown>;
+            for (const cellId of nextState.cellOutputs.keys()) {
+                events.push({ cellId, state: { cellId, output: { body: '', mime: 'text/plain' } } });
+            }
+            nextState.cellOutputs.clear();
             if (fullState?.cell_results) {
                 handleFullCellResults(fullState.cell_results as Record<string, unknown>, nextState, events);
             }
@@ -401,15 +407,21 @@ export function processNotebookDiff(
         handleCellField(cellId, field, patch.op, patch.value, nextState, events);
     }
 
-    return {
-        nextState,
-        events,
-    };
+    // Outputs must reach the kernel before terminal status, but intermediate
+    // body/MIME pairs must never be observable outside this atomic diff.
+    const finalOutputs = new Map<string, ProtocolCellStateEvent>();
+    const statusEvents: ProtocolCellStateEvent[] = [];
+    for (const event of events) {
+        const { output, ...status } = event.state;
+        if (output) { finalOutputs.set(event.cellId, { cellId: event.cellId, state: { cellId: event.cellId, output } }); }
+        if (Object.keys(status).some(key => key !== 'cellId')) { statusEvents.push({ cellId: event.cellId, state: status }); }
+    }
+    return { nextState, events: [...finalOutputs.values(), ...statusEvents] };
 }
 
 function cloneState(state: ProtocolRuntimeState): ProtocolRuntimeState {
     return {
-        cellOutputs: new Map(state.cellOutputs),
+        cellOutputs: new Map([...state.cellOutputs].map(([id, output]) => [id, { ...output }])),
         knownCellIds: new Set(state.knownCellIds),
         cellOrder: [...state.cellOrder],
         pendingCellIds: new Set(state.pendingCellIds),
@@ -450,10 +462,12 @@ function handleCellResult(
     if (result.runtime !== undefined) {
         cellState.runtime = result.runtime as number;
     }
+    const hadOutput = state.cellOutputs.delete(cellId);
+    if (hadOutput && !result.output) { cellState.output = { body: '', mime: 'text/plain' }; }
     if (result.output) {
         const output = extractOutput(result.output as Record<string, unknown>);
         cellState.output = output;
-        state.cellOutputs.set(cellId, output);
+        state.cellOutputs.set(cellId, { ...output, rawBody: selectedRawBody(result.output, output) });
     }
     if (result.logs) {
         cellState.logs = extractLogs(result.logs);
@@ -489,7 +503,7 @@ function handleCellField(
         }
         const output = extractOutput(value as Record<string, unknown>);
         cellState.output = output;
-        state.cellOutputs.set(cellId, output);
+        state.cellOutputs.set(cellId, { ...output, rawBody: selectedRawBody(value, output) });
     } else if (field === 'logs') {
         if (op === 'remove') {
             cellState.logs = [];
@@ -524,6 +538,9 @@ function handleOutputSubField(
     const output = state.cellOutputs.get(cellId) || { body: '', mime: 'text/plain' };
 
     if (subField === 'body') {
+        // Retain the wire payload so a MIME-only update in a later message can
+        // re-decode bytes losslessly. Nested edits operate on the decoded JSON.
+        if (op === 'remove' || tailPath.length > 0) { delete output.rawBody; }
         if (op === 'remove') {
             if (tailPath.length === 0) {
                 output.body = '';
@@ -547,19 +564,7 @@ function handleOutputSubField(
                     newBody = JSON.stringify(next);
                 }
             } else {
-                const decodedBody = tryDecodeMsgpackBinary(value, output.mime || 'text/plain');
-                if (decodedBody !== null) {
-                    newBody = decodedBody;
-                } else if (typeof value === 'string') {
-                    newBody = value;
-                } else if (value && typeof value === 'object') {
-                    const obj = value as Record<string, unknown>;
-                    if (obj.msg) {
-                        newBody = obj.msg as string;
-                    } else {
-                        newBody = JSON.stringify(value);
-                    }
-                }
+                newBody = decodeOutputBody(value, output.mime || 'text/plain');
             }
 
             const isObjectIdOnly = output.mime === 'application/vnd.pluto.tree+object' && isPlutoObjectId(newBody);
@@ -568,6 +573,7 @@ function handleOutputSubField(
             }
 
             if (newBody !== undefined) {
+                if (tailPath.length === 0) { output.rawBody = value; }
                 output.body = newBody;
             }
         }
@@ -576,6 +582,9 @@ function handleOutputSubField(
             output.mime = 'text/plain';
         } else {
             output.mime = value as string;
+        }
+        if (output.rawBody !== undefined) {
+            output.body = decodeOutputBody(output.rawBody, output.mime || 'text/plain');
         }
     } else if (subField === 'last_run_timestamp') {
         events.push({
@@ -587,6 +596,7 @@ function handleOutputSubField(
         });
         return;
     } else if (subField.includes('/')) {
+        delete output.rawBody;
         if (op === 'remove') {
             if (output.mime === subField) {
                 output.mime = 'text/plain';
