@@ -947,8 +947,16 @@ export class PlutoKernel {
                 try {
                     // Create a temporary execution to update the output
                     execution = this.controller.createNotebookCellExecution(cell);
+                    // Rendering owns a real VS Code execution too. Register it
+                    // before yielding so manual runs, stop, and later updates
+                    // can end/reuse it rather than creating a duplicate.
+                    this.cellExecutions.set(cellId, execution);
+                    this.cellExecStates.set(cellId, { ...this.reportedCellStates.get(cellId) });
                     execution.start(Date.now());
                     await execution.replaceOutput(outputs);
+                    // A manual run or terminal server update may have replaced
+                    // or ended this execution while output rendering awaited.
+                    if (this.cellExecutions.get(cellId) !== execution) { return; }
                     const status = this.reportedCellStates.get(cellId);
                     // Rendering output is not proof of successful execution. In
                     // particular, reactive error payloads can arrive in separate
@@ -958,11 +966,17 @@ export class PlutoKernel {
                         : status?.errored === true ? false
                         : status?.errored === false && status.running === false ? true : undefined;
                     execution.end(success, Date.now());
+                    this.cellExecutions.delete(cellId);
+                    this.cellExecStates.delete(cellId);
 
                     console.log(`[BetterPlutoKernel] Updated cell ${cellId} successfully`);
                 } catch (err) {
                     console.error(`[BetterPlutoKernel] Failed to update cell ${cellId}:`, err);
-                    try { execution?.end(false, Date.now()); } catch {}
+                    if (execution && this.cellExecutions.get(cellId) === execution) {
+                        try { execution.end(false, Date.now()); } catch {}
+                        this.cellExecutions.delete(cellId);
+                        this.cellExecStates.delete(cellId);
+                    }
                 }
                 break;
             }
