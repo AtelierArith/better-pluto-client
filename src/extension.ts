@@ -14,6 +14,7 @@ import { PlutoNotebookController } from './PlutoNotebookController';
 import { isValidRendererMessage, isSetBondMessage, isShowMoreMessage } from './renderer-messages';
 
 import { PlutoDefinitionProvider } from './pluto-definition-provider';
+import { showDependentCells } from './pluto-dependent-cells';
 import { toggleBeginEnd } from './begin-end-toggle';
 
 const NOTEBOOK_TYPE = 'pluto-notebook';
@@ -111,6 +112,11 @@ export function activate(context: vscode.ExtensionContext) {
     );
 
     // Register commands
+    context.subscriptions.push(
+        vscode.commands.registerCommand('pluto-notebook.showDependentCells', () =>
+            showDependentCells(notebook => controller?.getNavigation(notebook)))
+    );
+
     context.subscriptions.push(
         vscode.commands.registerCommand('pluto-notebook.openAsPlutoNotebook', async (uri?: vscode.Uri) => {
             // Get URI from active editor if not provided

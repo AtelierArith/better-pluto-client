@@ -167,3 +167,22 @@ before an undefined upstream value is accessed. This client does not promise
 transactional rollback or suppression of those side effects. The regression
 checks failed status and automatic successful recovery after fixing the upstream
 cell, not a stronger side-effect-blocking guarantee.
+
+### Show dependent cells
+
+Run **Pluto: Show Dependent Cells** from the Command Palette with a notebook cell
+selected and its kernel running. The picker lists directly dependent cells,
+related global names, and code previews in notebook order. Selecting an entry
+reveals that cell. This uses Pluto's dependency graph, works with complex cell
+bodies, and does not claim exact source locations or full **Find References**.
+Unsynchronized cells are excluded; changed or deleted selections are revalidated
+before navigation. No default keyboard shortcut is assigned.
+
+### Raster image output
+
+Pluto GIF, PNG and JPEG outputs are passed as binary notebook images (`image/jpg`
+is normalized to `image/jpeg`). BMP uses the existing HTML renderer with a
+canonical base64 image URL because VS Code does not register a native BMP
+notebook renderer. Tests cover protocol bytes, Julia-produced output, and image
+decoding in a VS Code webview. Structured ReactDOM/DivElement output still uses
+readable text fallback; it is not a fully interactive Pluto frontend.

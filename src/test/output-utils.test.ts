@@ -505,3 +505,32 @@ suite('Output Utils - Pluto table MIME', () => {
         }), [{ type: 'text', content: '{"value":"example"}', mime: 'text/plain' }]);
     });
 });
+
+suite('Output Utils - official Pluto raster formats', () => {
+    test('GIF bytes remain binary rather than base64 text', () => {
+        const bytes = Buffer.from('GIF89a\x01\x00\x01\x00', 'binary');
+        const [item] = buildOutputItems({ mime: 'image/gif', body: bytes.toString('base64') });
+        assert.strictEqual(item.type, 'binary');
+        assert.strictEqual(item.mime, 'image/gif');
+        assert.deepStrictEqual(item.content, new Uint8Array(bytes));
+    });
+    test('JPG alias routes original bytes to the declared JPEG renderer', () => {
+        const bytes = new Uint8Array([255, 216, 255, 217]);
+        const [item] = buildOutputItems({ mime: 'image/jpg', body: Buffer.from(bytes).toString('base64') });
+        assert.strictEqual(item.type, 'binary');
+        assert.strictEqual(item.mime, 'image/jpeg');
+        assert.deepStrictEqual(item.content, bytes);
+    });
+    test('BMP routes canonical image data through the existing HTML renderer', () => {
+        const bytes = Buffer.from([66, 77, 0, 1, 2, 3]);
+        const [item] = buildOutputItems({ mime: 'image/bmp', body: bytes.toString('base64') });
+        assert.strictEqual(item.type, 'text');
+        assert.strictEqual(item.mime, 'application/vnd.pluto.html+html');
+        assert.strictEqual(item.content, `<img src="data:image/bmp;base64,${bytes.toString('base64')}" alt="Pluto bitmap output">`);
+    });
+    test('BMP base64 is reencoded rather than interpolated as raw HTML', () => {
+        const [item] = buildOutputItems({ mime: 'image/bmp', body: 'Qk0=" onerror="evil()' });
+        assert.ok(!String(item.content).includes('onerror'));
+        assert.match(String(item.content), /^<img src="data:image\/bmp;base64,[A-Za-z0-9+/=]*" alt="Pluto bitmap output">$/);
+    });
+});

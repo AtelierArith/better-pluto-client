@@ -83,6 +83,11 @@
         "title": "Toggle Cell Code Visibility (Fold/Unfold)",
         "category": "Pluto",
         "icon": "$(eye)"
+      },
+      {
+        "command": "pluto-notebook.showDependentCells",
+        "title": "Show Dependent Cells",
+        "category": "Pluto"
       }
     ],
     "menus": {

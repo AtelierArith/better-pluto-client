@@ -127,14 +127,24 @@ export function buildOutputItems(
                 content: cachedOutput.body,
                 mime: 'image/svg+xml'
             });
-        } else if (mime === 'image/png' || mime === 'image/jpeg') {
+        } else if (['image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/bmp'].includes(mime)) {
             try {
                 const buffer = Buffer.from(cachedOutput.body, 'base64');
-                items.push({
-                    type: 'binary',
-                    content: new Uint8Array(buffer),
-                    mime: mime
-                });
+                if (mime === 'image/bmp') {
+                    // VS Code's built-in notebook renderer does not declare BMP.
+                    // Re-encode bytes so no untrusted text enters the HTML attribute.
+                    items.push({
+                        type: 'text',
+                        content: `<img src="data:image/bmp;base64,${buffer.toString('base64')}" alt="Pluto bitmap output">`,
+                        mime: 'application/vnd.pluto.html+html'
+                    });
+                } else {
+                    items.push({
+                        type: 'binary',
+                        content: new Uint8Array(buffer),
+                        mime: mime === 'image/jpg' ? 'image/jpeg' : mime
+                    });
+                }
             } catch {
                 items.push({
                     type: 'text',
