@@ -136,4 +136,73 @@ suite('Pluto notebook output state', () => {
         assert.deepStrictEqual(completions, [undefined]);
     });
 
+    test('manual rerun takes ownership while a reactive output replacement is pending', async () => {
+        let releaseOutput!: () => void;
+        const outputPending = new Promise<void>(resolve => { releaseOutput = resolve; });
+        let occupied = false;
+        let creates = 0;
+        let runs = 0;
+        const ended: number[] = [];
+        const manual = kernel as unknown as {
+            controller: vscode.NotebookController;
+            notebook: vscode.NotebookDocument;
+            executeCell(cell: vscode.NotebookCell): Promise<void>;
+            server: {
+                getPlutoCellId(id: string): string;
+                isKnownCell(id: string): boolean;
+                updateCell(id: string, code: string): Promise<void>;
+                runCell(id: string): Promise<void>;
+            };
+        };
+        const cell = manual.notebook.cellAt(0);
+        Object.assign(cell, { document: { getText: () => 'read("data.txt", String)', languageId: 'julia' } });
+        manual.controller.createNotebookCellExecution = () => {
+            assert.strictEqual(occupied, false, 'VS Code rejects overlapping execution objects');
+            occupied = true;
+            const id = ++creates;
+            return {
+                start: () => undefined,
+                end: () => { ended.push(id); occupied = false; },
+                replaceOutput: () => id === 1 ? outputPending : Promise.resolve(),
+                clearOutput: () => Promise.resolve(),
+            } as unknown as vscode.NotebookCellExecution;
+        };
+        manual.server.getPlutoCellId = id => id;
+        manual.server.isKnownCell = () => true;
+        manual.server.updateCell = async () => undefined;
+        manual.server.runCell = async () => { runs++; };
+        harness.cellOutputs.set('cell-1', { body: 'first-value', mime: 'text/plain' });
+        const rendering = harness.executeDirectUpdate('cell-1');
+        assert.ok(harness.cellExecutions.has('cell-1'), 'Pending reactive rendering must be tracked');
+        await manual.executeCell(cell);
+        const newExecution = harness.cellExecutions.get('cell-1');
+        assert.strictEqual(runs, 1, 'Manual run must reach Pluto');
+        assert.strictEqual(creates, 2);
+        assert.deepStrictEqual(ended, [1]);
+        releaseOutput();
+        await rendering;
+        assert.strictEqual(harness.cellExecutions.get('cell-1'), newExecution, 'Old renderer must not remove the manual execution');
+        assert.deepStrictEqual(ended, [1], 'Old renderer must not end a replaced execution twice');
+        harness.handleCellState('cell-1', { running: false, queued: false, errored: false });
+        assert.deepStrictEqual(ended, [1, 2]);
+    });
+
+    test('partial terminal updates during reactive rendering retain the accumulated error', async () => {
+        let releaseOutput!: () => void;
+        const pending = new Promise<void>(resolve => { releaseOutput = resolve; });
+        const ended: (boolean | undefined)[] = [];
+        execution.replaceOutput = () => pending;
+        execution.end = success => { ended.push(success); };
+        harness.handleCellState('cell-1', { running: false, queued: false, errored: true, output: { body: 'error', mime: 'text/plain' } });
+        for (const timer of harness.pendingDirectUpdates.values()) { clearTimeout(timer); }
+        harness.pendingDirectUpdates.clear();
+        const rendering = harness.executeDirectUpdate('cell-1');
+        harness.handleCellState('cell-1', { running: false });
+        assert.deepStrictEqual(ended, [false]);
+        releaseOutput();
+        await rendering;
+        assert.deepStrictEqual(ended, [false], 'Completed renderer must not end again');
+        assert.strictEqual(harness.cellExecutions.has('cell-1'), false);
+    });
+
 });
