@@ -55,6 +55,19 @@ function tempEnvironmentPath(): string {
 }
 
 suite('PlutoEnvironment', () => {
+    test('times out when a stale lock has an abandoned reclamation gate', async () => {
+        const environmentPath = tempEnvironmentPath();
+        const lockPath = path.join(environmentPath, '.better-pluto-client.lock');
+        fs.mkdirSync(lockPath);
+        fs.mkdirSync(path.join(lockPath, '.reclaim'));
+        fs.writeFileSync(path.join(lockPath, 'owner.json'), JSON.stringify({ pid: 2147483647 }));
+        const runner = new RecordingRunner({ exitCode: 1, stdout: '', stderr: 'missing Pluto' });
+        try {
+            await assert.rejects(new PlutoEnvironment({ environmentPath, runner, lockTimeoutMs: 20 }).ensure(), /Timed out waiting/);
+        } finally {
+            fs.rmSync(environmentPath, { recursive: true, force: true });
+        }
+    });
     test('a delayed stale-lock reclaimer preserves a replacement owner', async () => {
         const environmentPath = tempEnvironmentPath();
         const lockPath = path.join(environmentPath, '.better-pluto-client.lock');

@@ -301,6 +301,7 @@ export class PlutoServer extends EventEmitter {
             this.process.stderr?.on('data', (data) => {
                 const text = data.toString();
                 stderrBuffer += text;
+                this.logger(`[BetterPlutoServer] Julia stderr: ${text}`);
 
                 if (!connecting && !settled && (stderrBuffer.includes('Go to http://localhost') || stderrBuffer.includes('Go to http://127.0.0.1'))) {
                     httpReady = true;

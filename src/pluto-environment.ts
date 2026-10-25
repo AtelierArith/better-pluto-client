@@ -272,7 +272,6 @@ export class PlutoEnvironment implements PlutoEnvironmentManager {
 
                 if (await this.isStaleLock(lockPath)) {
                     await this.reclaimStaleLock(lockPath);
-                    continue;
                 }
 
                 if (Date.now() >= deadline) {
