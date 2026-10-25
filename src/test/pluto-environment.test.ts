@@ -55,6 +55,21 @@ function tempEnvironmentPath(): string {
 }
 
 suite('PlutoEnvironment', () => {
+    test('a delayed stale-lock reclaimer preserves a replacement owner', async () => {
+        const environmentPath = tempEnvironmentPath();
+        const lockPath = path.join(environmentPath, '.better-pluto-client.lock');
+        fs.mkdirSync(lockPath);
+        fs.writeFileSync(path.join(lockPath, 'owner.json'), JSON.stringify({ pid: process.pid, token: 'replacement' }));
+        try {
+            const environment = new PlutoEnvironment({ environmentPath }) as unknown as {
+                reclaimStaleLock(lockPath: string): Promise<void>;
+            };
+            await Promise.all([environment.reclaimStaleLock(lockPath), environment.reclaimStaleLock(lockPath)]);
+            assert.strictEqual(JSON.parse(fs.readFileSync(path.join(lockPath, 'owner.json'), 'utf8')).token, 'replacement');
+        } finally {
+            fs.rmSync(environmentPath, { recursive: true, force: true });
+        }
+    });
     test('uses an existing Pluto 1.x environment without reinstalling it', async () => {
         const environmentPath = tempEnvironmentPath();
         const runner = new RecordingRunner({
@@ -75,6 +90,7 @@ suite('PlutoEnvironment', () => {
             assert.strictEqual(info.version, '1.0.4');
             assert.strictEqual(info.projectPath, environmentPath);
             assert.strictEqual(runner.calls.length, 1);
+            assert.ok(runner.calls[0].args.some(arg => arg.includes('append!(LOAD_PATH, ["@", "@stdlib"])')));
             assert.strictEqual(runner.calls[0].executable, '/opt/julia/bin/julia');
             assert.deepStrictEqual(runner.calls[0].args.slice(0, 2), [
                 '--startup-file=no',

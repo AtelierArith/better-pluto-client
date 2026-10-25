@@ -92,6 +92,8 @@ const defaultRunner: JuliaCommandRunner = {
 };
 
 const validateScript = `
+empty!(LOAD_PATH)
+append!(LOAD_PATH, ["@", "@stdlib"])
 import Pluto
 version = Base.pkgversion(Pluto)
 version.major == 1 || error("Pluto 1.x is required, found $(version)")
@@ -99,6 +101,8 @@ println("PLUTO_VERSION=", version)
 `;
 
 const setupScript = `
+empty!(LOAD_PATH)
+append!(LOAD_PATH, ["@", "@stdlib"])
 import Pkg
 environment_path = ARGS[1]
 Pkg.activate(environment_path)
@@ -279,15 +283,17 @@ export class PlutoEnvironment implements PlutoEnvironmentManager {
         }
     }
 
-    private async isStaleLock(lockPath: string): Promise<boolean> {
+    private async isStaleLock(lockPath: string, inspectedStats?: fs.Stats): Promise<boolean> {
         try {
             const stats = await fs.promises.stat(lockPath);
+            const modifiedAt = inspectedStats && inspectedStats.ino === stats.ino && inspectedStats.dev === stats.dev
+                ? inspectedStats.mtimeMs : stats.mtimeMs;
             let contents: string;
             try {
                 contents = await fs.promises.readFile(path.join(lockPath, 'owner.json'), 'utf8');
             } catch (error) {
                 if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-                    return Date.now() - stats.mtimeMs > LOCK_STALE_AFTER_MS;
+                    return Date.now() - modifiedAt > LOCK_STALE_AFTER_MS;
                 }
                 throw error;
             }
@@ -306,7 +312,7 @@ export class PlutoEnvironment implements PlutoEnvironmentManager {
             } catch {
                 // Fall back to the lock age for malformed lock files.
             }
-            return Date.now() - stats.mtimeMs > LOCK_STALE_AFTER_MS;
+            return Date.now() - modifiedAt > LOCK_STALE_AFTER_MS;
         } catch (error) {
             if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
                 return true;
@@ -316,9 +322,13 @@ export class PlutoEnvironment implements PlutoEnvironmentManager {
     }
 
     private async reclaimStaleLock(lockPath: string): Promise<void> {
-        const stalePath = `${lockPath}.stale-${process.pid}-${randomUUID()}`;
+        // Serialize reclaimers inside the directory itself. A delayed contender
+        // must revalidate after acquiring this gate, including on a replacement lock.
+        const gatePath = path.join(lockPath, '.reclaim');
+        let inspectedStats: fs.Stats;
         try {
-            await fs.promises.rename(lockPath, stalePath);
+            inspectedStats = await fs.promises.stat(lockPath);
+            await fs.promises.mkdir(gatePath);
         } catch (error) {
             const code = (error as NodeJS.ErrnoException).code;
             if (code === 'ENOENT' || code === 'EEXIST') {
@@ -326,7 +336,11 @@ export class PlutoEnvironment implements PlutoEnvironmentManager {
             }
             throw error;
         }
-        await fs.promises.rm(stalePath, { recursive: true, force: true });
+        if (await this.isStaleLock(lockPath, inspectedStats)) {
+            await fs.promises.rm(lockPath, { recursive: true, force: true });
+        } else {
+            await fs.promises.rmdir(gatePath);
+        }
     }
 
     private info(version: string): PlutoEnvironmentInfo {

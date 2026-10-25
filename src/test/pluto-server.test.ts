@@ -472,6 +472,7 @@ suite('PlutoServer shared Julia environment', () => {
         const launchOptions = processRunner.launchOptions as JuliaLaunchOptions;
         assert.deepStrictEqual(launchOptions.scriptArgs, [notebookPath]);
         assert.strictEqual(processRunner.juliaCode.includes(notebookPath), false);
+        assert.ok(processRunner.juliaCode.includes('append!(LOAD_PATH, ["@", "@stdlib"])'));
 
         processRunner.stdoutDataHandler?.(Buffer.from('NOTEBOOK_ID=abc-123\n'));
         processRunner.stderrDataHandler?.(Buffer.from('Go to http://127.0.0.1:9999\n'));

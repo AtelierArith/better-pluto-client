@@ -201,6 +201,8 @@ export class PlutoServer extends EventEmitter {
         this.logger(`[BetterPlutoServer] Starting on port ${this.port}`);
 
         const juliaCode = `
+            empty!(LOAD_PATH)
+            append!(LOAD_PATH, ["@", "@stdlib"])
             import Pluto
 
             session = Pluto.ServerSession(;
