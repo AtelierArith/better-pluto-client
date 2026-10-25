@@ -21,9 +21,9 @@ jobs:
       - run: yarn install --frozen-lockfile
       - uses: julia-actions/setup-julia@v3
         with:
-          version: '1.10'
+          version: '1.13'
       - uses: julia-actions/cache@v2
-      - run: julia -e 'using Pkg; Pkg.add(name="Pluto", version="0.20"); Pkg.precompile()'
+      - run: julia --startup-file=no -e 'using Pkg; env = joinpath(DEPOT_PATH[1], "environments", "better-pluto-client"); Pkg.activate(env); Pkg.add(name="Pluto", version="1"); Pkg.precompile()'
       - run: yarn package
       # Runs type checks, development builds and lint via the pretest script.
       - run: xvfb-run -a yarn test

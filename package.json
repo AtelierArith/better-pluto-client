@@ -90,6 +90,21 @@
         "category": "Pluto"
       }
     ],
+    "configuration": {
+      "title": "BetterPlutoClient",
+      "properties": {
+        "betterPlutoClient.juliaExecutable": {
+          "type": "string",
+          "default": "julia",
+          "description": "Julia executable used to run the shared Pluto environment."
+        },
+        "betterPlutoClient.sharedEnvironmentPath": {
+          "type": "string",
+          "default": "",
+          "description": "Shared Julia environment for Pluto. Empty uses ~/.julia/environments/better-pluto-client."
+        }
+      }
+    },
     "menus": {
       "explorer/context": [
         {
@@ -159,7 +174,7 @@
     "watch-tests": "tsc -p . -w --outDir out",
     "pretest": "yarn run compile-tests && yarn run compile && yarn run lint",
     "lint": "eslint src",
-    "test": "vscode-test"
+    "test": "node scripts/run-vscode-test.mjs"
   },
   "dependencies": {
     "@msgpack/msgpack": "^3.1.0",

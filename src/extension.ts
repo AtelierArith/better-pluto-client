@@ -11,6 +11,7 @@
 import * as vscode from 'vscode';
 import { PlutoNotebookSerializer, isCellFolded, toggleCellFolded, getCellId } from './PlutoNotebookSerializer';
 import { PlutoNotebookController } from './PlutoNotebookController';
+import type { PlutoServerOptions } from './PlutoServer';
 import { isValidRendererMessage, isSetBondMessage, isShowMoreMessage } from './renderer-messages';
 
 import { PlutoDefinitionProvider } from './pluto-definition-provider';
@@ -65,7 +66,12 @@ export function activate(context: vscode.ExtensionContext) {
 
     // Register notebook controller
     log('Registering notebook controller');
-    controller = new PlutoNotebookController(context.extension.id);
+    const configuration = vscode.workspace.getConfiguration('betterPlutoClient');
+    const serverOptions: PlutoServerOptions = {
+        juliaExecutable: configuration.get<string>('juliaExecutable', 'julia'),
+        sharedEnvironmentPath: configuration.get<string>('sharedEnvironmentPath', '').trim() || undefined,
+    };
+    controller = new PlutoNotebookController(context.extension.id, serverOptions);
     context.subscriptions.push(controller);
     context.subscriptions.push(vscode.languages.registerDefinitionProvider(
         { scheme: 'vscode-notebook-cell', language: 'julia' },
@@ -143,7 +149,13 @@ export function activate(context: vscode.ExtensionContext) {
                     title: 'Starting Pluto kernel...',
                     cancellable: false
                 }, async () => {
-                    await controller!.startKernel(notebook);
+                    try {
+                        await controller!.startKernel(notebook);
+                    } catch (error) {
+                        const message = error instanceof Error ? error.message : String(error);
+                        log(`[BetterPluto] Failed to start Pluto kernel: ${message}`);
+                        vscode.window.showErrorMessage(`Failed to start Pluto kernel: ${message}`);
+                    }
                 });
             }
         })
@@ -163,14 +175,24 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('pluto-notebook.restartKernel', async () => {
             const notebook = getActiveNotebook();
             if (notebook && controller) {
+                let restarted = false;
                 await vscode.window.withProgress({
                     location: vscode.ProgressLocation.Notification,
                     title: 'Restarting Pluto kernel...',
                     cancellable: false
                 }, async () => {
-                    await controller!.restartKernel(notebook);
+                    try {
+                        await controller!.restartKernel(notebook);
+                        restarted = true;
+                    } catch (error) {
+                        const message = error instanceof Error ? error.message : String(error);
+                        log(`[BetterPluto] Failed to restart Pluto kernel: ${message}`);
+                        vscode.window.showErrorMessage(`Failed to restart Pluto kernel: ${message}`);
+                    }
                 });
-                vscode.window.showInformationMessage('Pluto kernel restarted');
+                if (restarted) {
+                    vscode.window.showInformationMessage('Pluto kernel restarted');
+                }
             }
         })
     );

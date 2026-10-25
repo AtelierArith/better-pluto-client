@@ -1,5 +1,5 @@
 ### A Pluto.jl notebook ###
-# v0.20.19
+# v1.0.4
 
 using Markdown
 using InteractiveUtils
@@ -10,6 +10,12 @@ using Example
 # ╔═╡ 3cb75c9f-d255-41cb-bc38-2f07b40b44ba
 hello("Me")
 
+# ╔═╡ ff39c404-95e6-4efc-b0a8-be880f65e4fe
+x = 2
+
+# ╔═╡ 301d4ef9-6ada-445d-8abb-93a5571488f9
+y = -1
+
 # ╔═╡ bd3e4c92-8881-4899-a6f2-dda583987f9d
 begin
     z = 3x + y
@@ -17,11 +23,11 @@ begin
     2z
 end
 
-# ╔═╡ ff39c404-95e6-4efc-b0a8-be880f65e4fe
-x = 2
+# ╔═╡ dc638292-b1db-42c3-ac78-ac71a18d2883
+rand(100)
 
-# ╔═╡ 301d4ef9-6ada-445d-8abb-93a5571488f9
-y = -1
+# ╔═╡ 203a917b-b4ec-4d27-a7d7-4f4b7db04e51
+
 
 # ╔═╡ 00000000-0000-0000-0000-000000000001
 PLUTO_PROJECT_TOML_CONTENTS = """
@@ -36,14 +42,19 @@ Example = "~0.5.5"
 PLUTO_MANIFEST_TOML_CONTENTS = """
 # This file is machine-generated - editing it directly is not advised
 
-julia_version = "1.12.4"
-manifest_format = "2.0"
+julia_version = "1.13.2"
+manifest_format = "2.1"
 project_hash = "daf68de77e1fc783e5acd54045fa0a34a435166f"
 
 [[deps.Example]]
 git-tree-sha1 = "e1f0e1a832ccd8e97d6d0348dec33ee139a5aeaf"
+registries = "General"
 uuid = "7876af07-990d-54b4-ab0e-23690620f79a"
 version = "0.5.5"
+
+[registries.General]
+url = "https://github.com/JuliaRegistries/General.git"
+uuid = "23338594-aafe-5451-b93e-139f81909106"
 """
 
 # ╔═╡ Cell order:
@@ -52,5 +63,7 @@ version = "0.5.5"
 # ╠═bd3e4c92-8881-4899-a6f2-dda583987f9d
 # ╠═ff39c404-95e6-4efc-b0a8-be880f65e4fe
 # ╠═301d4ef9-6ada-445d-8abb-93a5571488f9
+# ╠═dc638292-b1db-42c3-ac78-ac71a18d2883
+# ╠═203a917b-b4ec-4d27-a7d7-4f4b7db04e51
 # ╟─00000000-0000-0000-0000-000000000001
 # ╟─00000000-0000-0000-0000-000000000002

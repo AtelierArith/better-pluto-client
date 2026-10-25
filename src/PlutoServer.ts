@@ -8,6 +8,11 @@ import { EventEmitter } from 'events';
 import { PlutoNavigationState } from './pluto-navigation';
 import { log } from './extension';
 import {
+    PlutoEnvironment,
+    type PlutoEnvironmentInfo,
+    type PlutoEnvironmentManager,
+} from './pluto-environment';
+import {
     type ProtocolLogEntry,
     type ProtocolCellState,
     processNotebookDiff,
@@ -32,7 +37,13 @@ export interface Scheduler {
 }
 
 export interface ProcessRunner {
-    spawnJulia(juliaCode: string): ChildProcess;
+    spawnJulia(juliaCode: string, options?: JuliaLaunchOptions): ChildProcess;
+}
+
+export interface JuliaLaunchOptions {
+    juliaExecutable: string;
+    projectPath: string;
+    scriptArgs?: string[];
 }
 
 export interface KernelTransport {
@@ -56,6 +67,9 @@ export interface PlutoServerOptions {
     logger?: (message: string) => void;
     idGenerator?: () => string;
     portFinder?: () => Promise<number>;
+    environment?: PlutoEnvironmentManager;
+    juliaExecutable?: string;
+    sharedEnvironmentPath?: string;
 }
 
 const defaultScheduler: Scheduler = {
@@ -66,7 +80,16 @@ const defaultScheduler: Scheduler = {
 };
 
 const defaultProcessRunner: ProcessRunner = {
-    spawnJulia: (juliaCode: string) => spawn('julia', ['--project=@.', '-e', juliaCode]),
+    spawnJulia: (juliaCode: string, options: JuliaLaunchOptions = {
+        juliaExecutable: 'julia',
+        projectPath: '.',
+    }) => spawn(options.juliaExecutable, [
+        '--startup-file=no',
+        `--project=${options.projectPath}`,
+        '-e',
+        juliaCode,
+        ...(options.scriptArgs || []),
+    ]),
 };
 
 const defaultLogger = (message: string): void => {
@@ -143,6 +166,7 @@ export class PlutoServer extends EventEmitter {
     private readonly logger: (message: string) => void;
     private readonly idGenerator: () => string;
     private readonly portFinder: () => Promise<number>;
+    private readonly environment: PlutoEnvironmentManager;
 
     constructor(options: PlutoServerOptions = {}) {
         super();
@@ -152,6 +176,11 @@ export class PlutoServer extends EventEmitter {
         this.logger = options.logger || defaultLogger;
         this.idGenerator = options.idGenerator || defaultIdGenerator;
         this.portFinder = options.portFinder || defaultPortFinder;
+        this.environment = options.environment || new PlutoEnvironment({
+            juliaExecutable: options.juliaExecutable,
+            environmentPath: options.sharedEnvironmentPath,
+            logger: this.logger,
+        });
 
         this.clientId = this.idGenerator();
     }
@@ -165,6 +194,8 @@ export class PlutoServer extends EventEmitter {
     }
 
     async start(notebookPath: string): Promise<void> {
+        const environment = await this.environment.ensure();
+        this.logger(`[BetterPlutoServer] Using Pluto ${environment.version} from ${environment.projectPath}`);
         this.port = await this.portFinder();
 
         this.logger(`[BetterPlutoServer] Starting on port ${this.port}`);
@@ -183,7 +214,8 @@ export class PlutoServer extends EventEmitter {
                 )
             )
 
-            notebook = Pluto.SessionActions.open(session, "${notebookPath.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"; run_async=true)
+            notebook_path = ARGS[1]
+            notebook = Pluto.SessionActions.open(session, notebook_path; run_async=true)
 
             println("PLUTO_READY")
             println("NOTEBOOK_ID=", notebook.notebook_id)
@@ -193,7 +225,11 @@ export class PlutoServer extends EventEmitter {
         `;
 
         return new Promise((resolve, reject) => {
-            this.process = this.processRunner.spawnJulia(juliaCode);
+            this.process = this.processRunner.spawnJulia(juliaCode, {
+                juliaExecutable: environment.juliaExecutable,
+                projectPath: environment.projectPath,
+                scriptArgs: [notebookPath],
+            });
 
             let outputBuffer = '';
             let stderrBuffer = '';

@@ -3,7 +3,7 @@
  */
 
 import * as vscode from 'vscode';
-import { PlutoServer, CellState, LogEntry } from './PlutoServer';
+import { PlutoServer, CellState, LogEntry, type PlutoServerOptions } from './PlutoServer';
 import { getCellId, setCellId } from './PlutoNotebookSerializer';
 import { generateCellId, parse as parsePlutoNotebook } from './PlutoNotebookParser';
 import { isPlutoObjectId, escapeHtml } from './output-utils';
@@ -36,9 +36,10 @@ export class PlutoKernel {
     constructor(
         private controller: vscode.NotebookController,
         private notebook: vscode.NotebookDocument,
-        private onStateChange: () => void
+        private onStateChange: () => void,
+        serverOptions?: PlutoServerOptions
     ) {
-        this.server = new PlutoServer();
+        this.server = new PlutoServer(serverOptions);
         this.outputAdapter = new VscodeNotebookOutputAdapter({
             parseError: (body, mime) => this.parseErrorOutput(body, mime),
             addErrorHints: (body) => this.addErrorHints(body),
@@ -205,6 +206,7 @@ export class PlutoKernel {
      */
     async restart(): Promise<void> {
         await this.stop();
+        this.setupServerEvents();
         await this.start();
     }
 
@@ -1663,7 +1665,10 @@ export class PlutoNotebookController implements vscode.Disposable {
         }
     }
 
-    constructor(private readonly extensionId: string) {
+    constructor(
+        private readonly extensionId: string,
+        private readonly serverOptions?: PlutoServerOptions
+    ) {
         this.controller = vscode.notebooks.createNotebookController(
             'pluto-kernel',
             NOTEBOOK_TYPE,
@@ -1743,7 +1748,8 @@ export class PlutoNotebookController implements vscode.Disposable {
             const kernel = new PlutoKernel(
                 this.controller,
                 notebook,
-                () => this.updateContextState()
+                () => this.updateContextState(),
+                this.serverOptions
             );
             this.kernels.set(key, kernel);
         }
