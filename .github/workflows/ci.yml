@@ -25,6 +25,9 @@ jobs:
       - uses: julia-actions/cache@v2
       - run: julia --startup-file=no -e 'using Pkg; env = joinpath(DEPOT_PATH[1], "environments", "better-pluto-client"); Pkg.activate(env); Pkg.add(name="Pluto", version="1"); Pkg.precompile()'
       - run: yarn package
+      - run: julia --startup-file=no scripts/prepare-pluto-samples.jl
+        env:
+          JULIA_NUM_PRECOMPILE_TASKS: '1'
       # Runs type checks, development builds and lint via the pretest script.
       - run: xvfb-run -a yarn test
         env:
