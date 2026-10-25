@@ -15,7 +15,7 @@ A VS Code extension for editing Pluto.jl notebooks with **full native editor sup
 
 - VS Code or Cursor 1.80.0+
 - Julia installed and in PATH
-- Pluto.jl package installed (`using Pkg; Pkg.add("Pluto")`)
+- The extension's dedicated shared Julia environment installs Pluto 1.x on first kernel start
 - Recommended: [Julia extension](https://marketplace.visualstudio.com/items?itemName=julialang.language-julia)
 
 ## Installation
@@ -76,6 +76,11 @@ Or use the command palette:
 - **Pluto: Start Pluto Kernel**: Start the Pluto.jl backend
 - **Pluto: Stop Pluto Kernel**: Stop the kernel
 - **Pluto: Restart Pluto Kernel**: Restart the kernel
+
+The extension keeps Pluto in `~/.julia/environments/better-pluto-client`, shared by all
+notebooks and workspaces. You can override the Julia executable or shared environment
+path with `betterPlutoClient.juliaExecutable` and
+`betterPlutoClient.sharedEnvironmentPath`.
 
 ## Architecture
 
@@ -159,8 +164,9 @@ lexical scopes are deliberately left to the Julia language server. Cross-cell
 Find References and full language-server parity are not implemented.
 
 CI runs Julia-backed regression tests for unchanged manual reruns and dependency
-error recovery, in addition to the extension tests. Run locally with Pluto
-installed in Julia's active environment and `RUN_PLUTO_E2E=1 yarn test`.
+error recovery, in addition to the extension tests, using Pluto 1.x in the same
+dedicated shared environment. Run locally with `RUN_PLUTO_E2E=1 yarn test`; the
+first run installs Pluto 1.x into the shared environment if needed.
 
 Dependency errors follow Pluto itself: dependent cells may execute statements
 before an undefined upstream value is accessed. This client does not promise

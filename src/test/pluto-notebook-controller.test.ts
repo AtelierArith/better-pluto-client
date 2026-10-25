@@ -1,5 +1,6 @@
 import * as assert from 'assert';
 import * as vscode from 'vscode';
+import { EventEmitter } from 'events';
 import { PlutoKernel } from '../PlutoNotebookController';
 import type { CellState } from '../PlutoServer';
 import type { CachedOutput } from '../output-utils';
@@ -205,4 +206,37 @@ suite('Pluto notebook output state', () => {
         assert.strictEqual(harness.cellExecutions.has('cell-1'), false);
     });
 
+});
+
+suite('Pluto kernel restart lifecycle', () => {
+    test('reconnects server event handlers after restart', async () => {
+        const cell = { metadata: { custom: { id: 'cell-1' } } } as unknown as vscode.NotebookCell;
+        const notebook = {
+            cellCount: 1,
+            cellAt: () => cell,
+        } as unknown as vscode.NotebookDocument;
+        const controller = {
+            createNotebookCellExecution: () => ({}) as vscode.NotebookCellExecution,
+        } as unknown as vscode.NotebookController;
+        const kernel = new PlutoKernel(controller, notebook, () => undefined);
+        const server = new EventEmitter() as EventEmitter & { stop(): void };
+        server.stop = () => { server.removeAllListeners(); };
+        const internal = kernel as unknown as {
+            server: typeof server;
+            setupServerEvents(): void;
+            stop(): Promise<void>;
+            start(): Promise<void>;
+            restart(): Promise<void>;
+        };
+        internal.server = server;
+        internal.setupServerEvents();
+        internal.stop = async () => { server.stop(); };
+        internal.start = async () => undefined;
+
+        await internal.restart();
+
+        assert.strictEqual(server.listenerCount('cellState'), 1);
+        assert.strictEqual(server.listenerCount('error'), 1);
+        assert.strictEqual(server.listenerCount('closed'), 1);
+    });
 });

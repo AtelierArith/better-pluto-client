@@ -2,6 +2,7 @@ out
 dist
 node_modules
 .vscode-test/
+.vscode-test-runtime-*.mjs
 *.vsix
 
 # Reference implementations (for local development only)

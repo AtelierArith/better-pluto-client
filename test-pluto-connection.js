@@ -7,6 +7,8 @@ const { spawn } = require('child_process');
 const WebSocket = require('ws');
 const { encode, decode } = require('@msgpack/msgpack');
 const net = require('net');
+const os = require('os');
+const path = require('path');
 
 // Generate UUID without external dependency
 function uuidv4() {
@@ -33,7 +35,8 @@ async function main() {
     const port = await findPort();
     console.log(`Using port: ${port}`);
 
-    const notebookPath = './samples/Basic.jl';
+    const notebookPath = path.resolve(__dirname, 'samples/Basic.jl');
+    const sharedEnvironmentPath = path.join(os.homedir(), '.julia', 'environments', 'better-pluto-client');
 
     // Julia code to start Pluto
     const juliaCode = `
@@ -48,7 +51,8 @@ async function main() {
             )
         )
 
-        notebook = Pluto.SessionActions.open(session, "${notebookPath}"; run_async=true)
+        notebook_path = ARGS[1]
+        notebook = Pluto.SessionActions.open(session, notebook_path; run_async=true)
 
         println("PLUTO_READY")
         println("NOTEBOOK_ID=", string(notebook.notebook_id))
@@ -58,7 +62,7 @@ async function main() {
     `;
 
     console.log('Starting Pluto server...');
-    const juliaProcess = spawn('julia', ['--project=@.', '-e', juliaCode], {
+    const juliaProcess = spawn('julia', ['--startup-file=no', `--project=${sharedEnvironmentPath}`, '-e', juliaCode, notebookPath], {
         cwd: __dirname,
     });
 

@@ -1,5 +1,6 @@
 import * as assert from 'assert';
-import { PlutoServer, type Scheduler, type ProcessRunner, type KernelTransportFactory, type KernelTransport } from '../PlutoServer';
+import { PlutoServer, type Scheduler, type ProcessRunner, type JuliaLaunchOptions, type KernelTransportFactory, type KernelTransport } from '../PlutoServer';
+import type { PlutoEnvironmentInfo, PlutoEnvironmentManager } from '../pluto-environment';
 
 class NoopScheduler implements Scheduler {
     setTimeout(_handler: () => void, _ms: number): NodeJS.Timeout { return 1 as unknown as NodeJS.Timeout; }
@@ -111,6 +112,31 @@ class TrackingProcessRunner implements ProcessRunner {
     }
 }
 
+class RecordingEnvironment implements PlutoEnvironmentManager {
+    readonly info: PlutoEnvironmentInfo = {
+        juliaExecutable: '/opt/julia/bin/julia',
+        projectPath: '/tmp/better-pluto-client-shared-environment',
+        version: '1.0.4',
+    };
+    ensureCalls = 0;
+
+    async ensure(): Promise<PlutoEnvironmentInfo> {
+        this.ensureCalls++;
+        return this.info;
+    }
+}
+
+class LaunchOptionsProcessRunner extends TrackingProcessRunner {
+    launchOptions: unknown;
+    juliaCode = '';
+
+    override spawnJulia(juliaCode: string, options?: JuliaLaunchOptions) {
+        this.juliaCode = juliaCode;
+        this.launchOptions = options;
+        return super.spawnJulia(juliaCode);
+    }
+}
+
 /**
  * A controllable transport that lets tests trigger onOpen / onError / onClose.
  */
@@ -142,6 +168,7 @@ suite('PlutoServer startup error cleanup (#71)', () => {
     test('timeout kills the Julia process', async () => {
         const scheduler = new ControllableScheduler();
         const processRunner = new TrackingProcessRunner();
+        const environment = new RecordingEnvironment();
 
         const server = new PlutoServer({
             scheduler,
@@ -149,6 +176,7 @@ suite('PlutoServer startup error cleanup (#71)', () => {
             transportFactory: new NoopTransportFactory(),
             logger: () => {},
             portFinder: async () => 9999,
+            environment,
         });
 
         const startPromise = server.start('/fake/notebook.jl');
@@ -168,6 +196,7 @@ suite('PlutoServer startup error cleanup (#71)', () => {
     test('process error kills the Julia process', async () => {
         const scheduler = new ControllableScheduler();
         const processRunner = new TrackingProcessRunner();
+        const environment = new RecordingEnvironment();
 
         const server = new PlutoServer({
             scheduler,
@@ -175,6 +204,7 @@ suite('PlutoServer startup error cleanup (#71)', () => {
             transportFactory: new NoopTransportFactory(),
             logger: () => {},
             portFinder: async () => 9999,
+            environment,
         });
 
         // Add error listener to prevent EventEmitter from throwing
@@ -200,6 +230,7 @@ suite('PlutoServer WebSocket settled flag (#72)', () => {
         const scheduler = new ControllableScheduler();
         const transport = new ControllableTransport();
         const processRunner = new TrackingProcessRunner();
+        const environment = new RecordingEnvironment();
         const logs: string[] = [];
 
         const server = new PlutoServer({
@@ -210,6 +241,7 @@ suite('PlutoServer WebSocket settled flag (#72)', () => {
             },
             logger: (msg) => { logs.push(msg); },
             portFinder: async () => 9999,
+            environment,
         });
 
         const startPromise = server.start('/fake/notebook.jl');
@@ -251,6 +283,7 @@ suite('PlutoServer connection timeout race (#74)', () => {
     test('timeout during connect delay still rejects and cleans up', async () => {
         const scheduler = new ControllableScheduler();
         const processRunner = new TrackingProcessRunner();
+        const environment = new RecordingEnvironment();
 
         const server = new PlutoServer({
             scheduler,
@@ -258,6 +291,7 @@ suite('PlutoServer connection timeout race (#74)', () => {
             transportFactory: new NoopTransportFactory(),
             logger: () => {},
             portFinder: async () => 9999,
+            environment,
         });
 
         const startPromise = server.start('/fake/notebook.jl');
@@ -284,6 +318,7 @@ suite('PlutoServer connection timeout race (#74)', () => {
     test('process error during connect delay rejects once', async () => {
         const scheduler = new ControllableScheduler();
         const processRunner = new TrackingProcessRunner();
+        const environment = new RecordingEnvironment();
 
         const server = new PlutoServer({
             scheduler,
@@ -291,6 +326,7 @@ suite('PlutoServer connection timeout race (#74)', () => {
             transportFactory: new NoopTransportFactory(),
             logger: () => {},
             portFinder: async () => 9999,
+            environment,
         });
 
         server.on('error', () => {});
@@ -345,6 +381,7 @@ suite('PlutoServer EventEmitter cleanup (#76)', () => {
         const scheduler = new ControllableScheduler();
         const transport = new ControllableTransport();
         const processRunner = new TrackingProcessRunner();
+        const environment = new RecordingEnvironment();
 
         const server = new PlutoServer({
             scheduler,
@@ -352,6 +389,7 @@ suite('PlutoServer EventEmitter cleanup (#76)', () => {
             transportFactory: { async create() { return transport; } },
             logger: () => {},
             portFinder: async () => 9999,
+            environment,
         });
 
         // Simulate a full start cycle
@@ -373,6 +411,77 @@ suite('PlutoServer EventEmitter cleanup (#76)', () => {
         // Stop should clear all listeners
         server.stop();
         assert.strictEqual(server.listenerCount('cellState'), 0, 'cellState listener should be removed after stop');
+    });
+});
+
+suite('PlutoServer shared Julia environment', () => {
+    test('ensures Pluto 1.x and launches Julia with that shared project', async () => {
+        const scheduler = new ControllableScheduler();
+        const processRunner = new LaunchOptionsProcessRunner();
+        const environment = new RecordingEnvironment();
+        const transport = new ControllableTransport();
+
+        const server = new PlutoServer({
+            scheduler,
+            processRunner,
+            environment,
+            transportFactory: { async create() { return transport; } },
+            logger: () => {},
+            portFinder: async () => 9999,
+        });
+
+        const startPromise = server.start('/fake/notebook.jl');
+        await tick();
+
+        assert.strictEqual(environment.ensureCalls, 1);
+        assert.deepStrictEqual(processRunner.launchOptions, {
+            juliaExecutable: environment.info.juliaExecutable,
+            projectPath: environment.info.projectPath,
+            scriptArgs: ['/fake/notebook.jl'],
+        });
+
+        processRunner.stdoutDataHandler?.(Buffer.from('NOTEBOOK_ID=abc-123\n'));
+        processRunner.stderrDataHandler?.(Buffer.from('Go to http://127.0.0.1:9999\n'));
+        scheduler.fireByMs(1000);
+        await tick();
+        transport.triggerOpen();
+        scheduler.fireByMs(500);
+        await startPromise;
+        server.stop();
+    });
+
+    test('passes notebook paths as Julia arguments instead of interpolating them into source', async () => {
+        const scheduler = new ControllableScheduler();
+        const processRunner = new LaunchOptionsProcessRunner();
+        const environment = new RecordingEnvironment();
+        const transport = new ControllableTransport();
+        const notebookPath = '/tmp/notebook-$HOME/quoted"name.jl';
+
+        const server = new PlutoServer({
+            scheduler,
+            processRunner,
+            environment,
+            transportFactory: { async create() { return transport; } },
+            logger: () => {},
+            portFinder: async () => 9999,
+        });
+
+        const startPromise = server.start(notebookPath);
+        await tick();
+
+        const launchOptions = processRunner.launchOptions as JuliaLaunchOptions;
+        assert.deepStrictEqual(launchOptions.scriptArgs, [notebookPath]);
+        assert.strictEqual(processRunner.juliaCode.includes(notebookPath), false);
+        assert.ok(processRunner.juliaCode.includes('append!(LOAD_PATH, ["@", "@stdlib"])'));
+
+        processRunner.stdoutDataHandler?.(Buffer.from('NOTEBOOK_ID=abc-123\n'));
+        processRunner.stderrDataHandler?.(Buffer.from('Go to http://127.0.0.1:9999\n'));
+        scheduler.fireByMs(1000);
+        await tick();
+        transport.triggerOpen();
+        scheduler.fireByMs(500);
+        await startPromise;
+        server.stop();
     });
 });
 
